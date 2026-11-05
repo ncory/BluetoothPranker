@@ -1,7 +1,7 @@
 // BLE protocol shared with the iOS companion app (see ../../docs/PROTOCOL.md).
 #pragma once
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
 #define PROTOCOL_VERSION 2
 
 #define SVC_UUID       "b10e0000-7a5c-4f3b-9e2d-5c0ffee0b10e"

@@ -156,7 +156,7 @@ static String handleEvent(int idx, PresenceEvent e, uint32_t now) {
     else if (armRemainingMs(now) > 0) why = "arming";
     else if (enter ? !settings.playEnter : !settings.playLeave) why = "off";
     else if (cooldownRemainingMs(tr, now) > 0) why = "cooldown";
-    else if ((int)random(100) >= settings.chance) why = "chance";
+    else if ((int)random(100) >= (enter ? settings.enterChance : settings.leaveChance)) why = "chance";
     else if (audioBusy()) why = "busy";
     else {
         audioPlay(id, enter);

@@ -20,7 +20,7 @@ All UUIDs share the suffix `-7a5c-4f3b-9e2d-5c0ffee0b10e`.
 ```json
 {"armed":true,"enter":-70,"exit":-82,"absence":30,"exitHold":8,"smooth":0.30,
  "cooldown":20,"armDelay":60,"vol":80,"playEnter":true,"playLeave":true,
- "chance":100,"led":false,"name":"Pranker"}
+ "chanceIn":100,"chanceOut":100,"led":false,"name":"Pranker"}
 ```
 
 Writes are merged: unknown keys are ignored, values are clamped, the result

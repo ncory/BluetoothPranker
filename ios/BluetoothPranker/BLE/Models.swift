@@ -60,7 +60,8 @@ struct DeviceConfig: Codable, Equatable {
     var volume: Int
     var playEnter: Bool
     var playLeave: Bool
-    var chance: Int
+    var enterChance: Int   // % of arrivals that play a sound
+    var leaveChance: Int   // % of departures that play a sound
     var led: Bool
     var name: String
 
@@ -74,7 +75,9 @@ struct DeviceConfig: Codable, Equatable {
         case cooldownSec = "cooldown"
         case armDelaySec = "armDelay"
         case volume = "vol"
-        case playEnter, playLeave, chance, led, name
+        case enterChance = "chanceIn"
+        case leaveChance = "chanceOut"
+        case playEnter, playLeave, led, name
     }
 }
 

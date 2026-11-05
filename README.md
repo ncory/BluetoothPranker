@@ -40,7 +40,8 @@ to devices it pairs with. So:
    while, means "left". The gap between the two thresholds stops it from
    flip-flopping at the doorway.
 4. **Prank.** On arrive/leave it plays that target's own sound if it has one,
-   otherwise the default sound. Hide timer, cooldown and random
+   otherwise the default sound. Separate *random chance* settings for arrivals
+   and departures (e.g. 50% or 20%) make it play only some of the time. Hide timer, cooldown and random
    chance settings keep it unpredictable and give you time to hide it.
 
 ## What you need

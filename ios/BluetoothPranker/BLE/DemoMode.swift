@@ -94,8 +94,10 @@ final class DemoDevice {
             any = any || now
             if now != was {
                 let enabledKind = now ? cfg.playEnter : cfg.playLeave
-                let played = armed && enabledKind
-                let why: String? = !cfg.armed ? "disarmed" : (!armed ? "arming" : (!enabledKind ? "off" : nil))
+                let lucky = Int.random(in: 0..<100) < (now ? cfg.enterChance : cfg.leaveChance)
+                let played = armed && enabledKind && lucky
+                let why: String? = !cfg.armed ? "disarmed"
+                    : (!armed ? "arming" : (!enabledKind ? "off" : (!lucky ? "chance" : nil)))
                 if played { playingUntil = Date().addingTimeInterval(1.5) }
                 ble.applyEvent(DeviceEvent(date: Date(), targetID: target.id, targetName: target.name,
                                            enter: now, played: played, reason: why))
@@ -178,7 +180,7 @@ final class DemoDevice {
 extension DeviceConfig {
     static let demoDefault = DeviceConfig(
         armed: true, enterRssi: -68, exitRssi: -80, absenceSec: 30, exitHoldSec: 8, smoothing: 0.3,
-        cooldownSec: 20, armDelaySec: 60, volume: 80, playEnter: true, playLeave: true, chance: 100,
+        cooldownSec: 20, armDelaySec: 60, volume: 80, playEnter: true, playLeave: true, enterChance: 100, leaveChance: 50,
         led: false, name: "Pranker")
 }
 

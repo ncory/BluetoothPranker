@@ -19,7 +19,8 @@ static void clampAll(Settings& s) {
     s.cooldownSec = clampv(s.cooldownSec, 0, 3600);
     s.armDelaySec = clampv(s.armDelaySec, 0, 3600);
     s.volume      = clampv(s.volume, 0, 100);
-    s.chance      = clampv(s.chance, 0, 100);
+    s.enterChance = clampv(s.enterChance, 0, 100);
+    s.leaveChance = clampv(s.leaveChance, 0, 100);
     if (s.name.length() == 0) s.name = "Pranker";
     if (s.name.length() > 20) s.name = s.name.substring(0, 20);
 }
@@ -37,7 +38,8 @@ String settingsToJson() {
     doc["vol"]       = settings.volume;
     doc["playEnter"] = settings.playEnter;
     doc["playLeave"] = settings.playLeave;
-    doc["chance"]    = settings.chance;
+    doc["chanceIn"]  = settings.enterChance;
+    doc["chanceOut"] = settings.leaveChance;
     doc["led"]       = settings.led;
     doc["name"]      = settings.name;
     String out;
@@ -64,7 +66,9 @@ bool settingsApplyJson(const uint8_t* data, size_t len, String& err) {
     if (doc["vol"].is<int>())        s.volume      = doc["vol"];
     if (doc["playEnter"].is<bool>()) s.playEnter   = doc["playEnter"];
     if (doc["playLeave"].is<bool>()) s.playLeave   = doc["playLeave"];
-    if (doc["chance"].is<int>())     s.chance      = doc["chance"];
+    if (doc["chance"].is<int>()) s.enterChance = s.leaveChance = doc["chance"];  // firmware <= 1.1
+    if (doc["chanceIn"].is<int>())   s.enterChance = doc["chanceIn"];
+    if (doc["chanceOut"].is<int>())  s.leaveChance = doc["chanceOut"];
     if (doc["led"].is<bool>())       s.led         = doc["led"];
     if (doc["name"].is<const char*>()) s.name      = doc["name"].as<const char*>();
     clampAll(s);

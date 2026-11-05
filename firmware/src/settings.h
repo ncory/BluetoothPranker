@@ -13,7 +13,8 @@ struct Settings {
     int    volume      = 80;     // 0..100
     bool   playEnter   = true;
     bool   playLeave   = true;
-    int    chance      = 100;    // % chance a trigger actually plays (keeps them guessing)
+    int    enterChance = 100;    // % chance an arrival actually plays (keeps them guessing)
+    int    leaveChance = 100;    // % chance a departure actually plays
     bool   led         = false;  // show presence on the LED (off = stealth)
     String name        = "Pranker";
 };

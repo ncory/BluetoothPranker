@@ -100,6 +100,10 @@ private struct PrankSection: View {
                 set: { v in ble.perform { try await ble.update { $0.armed = v } } })) {
                 Label("Armed", systemImage: "bolt.fill")
             }
+            if let cfg = ble.config, cfg.enterChance < 100 || cfg.leaveChance < 100 {
+                Label("Random: \(cfg.enterChance)% of arrivals, \(cfg.leaveChance)% of departures", systemImage: "dice")
+                    .foregroundStyle(.secondary)
+            }
             if let wait = ble.status?.armingRemaining, wait > 0 {
                 Label("Silent for \(formatDuration(wait)) more (hide timer)", systemImage: "timer")
                     .foregroundStyle(.orange)

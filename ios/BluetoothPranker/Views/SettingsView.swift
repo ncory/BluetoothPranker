@@ -53,11 +53,17 @@ struct SettingsView: View {
                 LabeledContent("Volume", value: "\(c.wrappedValue.volume)%")
                 Slider(value: doubleBinding(c.volume), in: 0...100, step: 5)
             }
-            Stepper("Chance to play: \(c.wrappedValue.chance)%", value: c.chance, in: 0...100, step: 10)
         } header: {
             Text("Sounds")
+        }
+
+        Section {
+            ChanceControl(title: "On arrival", symbol: Clip.enter.symbol, value: c.enterChance)
+            ChanceControl(title: "On departure", symbol: Clip.leave.symbol, value: c.leaveChance)
+        } header: {
+            Text("Randomness")
         } footer: {
-            Text("Under 100% chance makes it unpredictable, so it's harder to work out what's happening.")
+            Text("The chance that a sound actually plays each time someone arrives or leaves. Below 100% it only happens some of the time, which makes it much harder to work out what's going on. Skipped events still show in the log.")
         }
 
         Section {
@@ -104,5 +110,46 @@ struct SettingsView: View {
             }
             saving = false
         }
+    }
+}
+
+/// Percentage slider with quick presets, e.g. "plays 1 in 5 times".
+struct ChanceControl: View {
+    let title: String
+    let symbol: String
+    @Binding var value: Int
+    private let presets = [100, 50, 25, 20, 10]
+
+    private var meaning: String {
+        switch value {
+        case 100: return "Every time"
+        case 0: return "Never"
+        default:
+            let oneIn = 100.0 / Double(value)
+            if abs(oneIn - oneIn.rounded()) < 0.05 { return "About 1 in \(Int(oneIn.rounded())) times" }
+            return "\(value)% of the time"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(title, systemImage: symbol)
+                Spacer()
+                Text("\(value)%").monospacedDigit().foregroundStyle(.secondary)
+            }
+            Slider(value: Binding(get: { Double(value) }, set: { value = Int($0.rounded()) }), in: 0...100, step: 5)
+            HStack(spacing: 6) {
+                ForEach(presets, id: \.self) { p in
+                    Button("\(p)%") { value = p }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(value == p ? .accentColor : .secondary)
+                }
+                Spacer()
+            }
+            Text(meaning).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 }
