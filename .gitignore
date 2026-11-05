@@ -1,0 +1,11 @@
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/build/
+DerivedData/
+
+.DS_Store
