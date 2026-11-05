@@ -5,4 +5,6 @@
 // iPhone never reconnects to the "keyboard".
 #pragma once
 
-[[noreturn]] void enrollRun();
+#include <Arduino.h>
+
+[[noreturn]] void enrollRun(const String& targetName);

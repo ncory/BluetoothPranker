@@ -27,15 +27,12 @@ String settingsToJson();
 // Returns false and sets err on malformed JSON.
 bool   settingsApplyJson(const uint8_t* data, size_t len, String& err);
 
-bool irkLoad(uint8_t out[16]);
-void irkSave(const uint8_t irk[16]);
-void irkClear();
-
-// One-shot flag that makes the next boot enter enrollment mode.
-void requestEnrollOnNextBoot(bool enable);
-bool enrollRequested();
+// One-shot request that makes the next boot enter enrollment mode for a
+// target with the given name. enrollRequested() consumes the request.
+void requestEnrollOnNextBoot(const char* targetName);
+bool enrollRequested(String& targetName);
 
 // Result of the last enrollment attempt, shown in the app.
-enum EnrollResult : int { ENROLL_NONE = 0, ENROLL_OK = 1, ENROLL_TIMEOUT = 2, ENROLL_FAILED = 3, ENROLL_CANCELLED = 4 };
+enum EnrollResult : int { ENROLL_NONE = 0, ENROLL_OK = 1, ENROLL_TIMEOUT = 2, ENROLL_FAILED = 3, ENROLL_CANCELLED = 4, ENROLL_FULL = 5 };
 void enrollResultSet(int r);
 int  enrollResultGet();

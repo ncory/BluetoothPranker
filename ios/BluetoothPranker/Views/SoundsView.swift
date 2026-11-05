@@ -5,86 +5,58 @@ import UniformTypeIdentifiers
 struct PreparedSource: Identifiable {
     let id = UUID()
     let url: URL
-    let clip: Clip
+    let slot: ClipSlot
     let title: String
 }
 
-struct SoundsView: View {
-    @Environment(BLEManager.self) private var ble
-    @State private var target: Clip = .enter
-    @State private var importing = false
-    @State private var recording = false
-    @State private var speaking = false
-    @State private var pending: PreparedSource?   // waits for the source sheet to close
-    @State private var prepared: PreparedSource?  // drives the upload sheet
+/// Drives the "replace a sound" flow: pick a source (record, text-to-speech,
+/// import), then convert, preview and upload. Shared by the Sounds screen and
+/// the per-target screen; attach with `.clipFlowHost(flow)`.
+@Observable
+final class ClipFlow {
+    var slot = ClipSlot(targetID: nil, kind: .enter)
+    var importing = false
+    var recording = false
+    var speaking = false
+    var pending: PreparedSource?   // waits for the source sheet to close
+    var prepared: PreparedSource?  // drives the upload sheet
 
-    var body: some View {
-        List {
-            ForEach(Clip.allCases) { clip in
-                let bytes = ble.info?.clipBytes(clip) ?? 0
-                Section {
-                    LabeledContent("Current") {
-                        Text(bytes > 0 ? String(format: "Custom clip · %.1f s", clipSeconds(bytes)) : "Built-in jingle")
-                    }
-                    Button {
-                        ble.perform { try await ble.play(clip) }
-                    } label: {
-                        Label("Play on device", systemImage: "play.fill")
-                    }
-                    Menu {
-                        Button("Record with microphone", systemImage: "mic") { target = clip; recording = true }
-                        Button("Text to speech", systemImage: "text.bubble") { target = clip; speaking = true }
-                        Button("Import audio file", systemImage: "folder") { target = clip; importing = true }
-                    } label: {
-                        Label("Replace…", systemImage: "square.and.arrow.down")
-                    }
-                    if bytes > 0 {
-                        Button("Go back to built-in jingle", role: .destructive) {
-                            ble.perform { try await ble.deleteClip(clip) }
-                        }
-                    }
-                } header: {
-                    Label(clip.title, systemImage: clip.symbol)
-                }
-            }
-            Section {
-                if let info = ble.info {
-                    LabeledContent("Free space on device", value: formatBytes(info.freeBytes))
-                }
-            } footer: {
-                Text("Clips are converted to 16 kHz mono, trimmed, normalized and limited to \(Int(ClipConverter.maxSeconds)) seconds. Short, punchy sounds work best on the tiny speaker. Set the volume in Settings.")
-            }
-        }
-        .navigationTitle("Sounds")
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.audio]) { result in
-            guard case .success(let url) = result else { return }
-            do {
-                let copy = try copyToTemp(url)
-                prepared = PreparedSource(url: copy, clip: target, title: url.lastPathComponent)
-            } catch {
-                ble.lastError = error.localizedDescription
-            }
-        }
-        .sheet(isPresented: $recording, onDismiss: presentPending) {
-            RecorderSheet { url in
-                pending = PreparedSource(url: url, clip: target, title: "Voice recording")
-            }
-        }
-        .sheet(isPresented: $speaking, onDismiss: presentPending) {
-            SpeechSheet { url, text in
-                pending = PreparedSource(url: url, clip: target, title: "“\(text)”")
-            }
-        }
-        .sheet(item: $prepared) { src in
-            ClipUploadSheet(source: src)
-        }
-    }
-
-    private func presentPending() {
+    func presentPending() {
         if let p = pending {
             pending = nil
             prepared = p
         }
+    }
+}
+
+struct ClipFlowHost: ViewModifier {
+    @Bindable var flow: ClipFlow
+    @Environment(BLEManager.self) private var ble
+
+    func body(content: Content) -> some View {
+        content
+            .fileImporter(isPresented: $flow.importing, allowedContentTypes: [.audio]) { result in
+                guard case .success(let url) = result else { return }
+                do {
+                    let copy = try copyToTemp(url)
+                    flow.prepared = PreparedSource(url: copy, slot: flow.slot, title: url.lastPathComponent)
+                } catch {
+                    ble.lastError = error.localizedDescription
+                }
+            }
+            .sheet(isPresented: $flow.recording, onDismiss: flow.presentPending) {
+                RecorderSheet { url in
+                    flow.pending = PreparedSource(url: url, slot: flow.slot, title: "Voice recording")
+                }
+            }
+            .sheet(isPresented: $flow.speaking, onDismiss: flow.presentPending) {
+                SpeechSheet { url, text in
+                    flow.pending = PreparedSource(url: url, slot: flow.slot, title: "“\(text)”")
+                }
+            }
+            .sheet(item: $flow.prepared) { src in
+                ClipUploadSheet(source: src)
+            }
     }
 
     private func copyToTemp(_ url: URL) throws -> URL {
@@ -94,6 +66,100 @@ struct SoundsView: View {
             .appendingPathComponent("\(UUID().uuidString)-\(url.lastPathComponent)")
         try FileManager.default.copyItem(at: url, to: dest)
         return dest
+    }
+}
+
+extension View {
+    func clipFlowHost(_ flow: ClipFlow) -> some View { modifier(ClipFlowHost(flow: flow)) }
+}
+
+/// Shows one clip slot with play / replace / reset actions.
+struct ClipSlotRow: View {
+    let slot: ClipSlot
+    let bytes: Int
+    let flow: ClipFlow
+    @Environment(BLEManager.self) private var ble
+
+    private var fallback: String { slot.targetID == nil ? "Built-in jingle" : "Uses the default sound" }
+
+    var body: some View {
+        HStack {
+            Image(systemName: slot.kind.symbol)
+                .foregroundStyle(slot.kind == .enter ? .green : .orange)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(slot.kind.title)
+                Text(bytes > 0 ? String(format: "Custom clip · %.1f s", clipSeconds(bytes)) : fallback)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                ble.perform { try await ble.play(slot) }
+            } label: {
+                Image(systemName: "play.fill")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Play on device")
+            Menu {
+                Button("Record with microphone", systemImage: "mic") { begin { flow.recording = true } }
+                Button("Text to speech", systemImage: "text.bubble") { begin { flow.speaking = true } }
+                Button("Import audio file", systemImage: "folder") { begin { flow.importing = true } }
+                if bytes > 0 {
+                    Divider()
+                    Button(slot.targetID == nil ? "Use built-in jingle" : "Use default sound",
+                           systemImage: "arrow.uturn.backward", role: .destructive) {
+                        ble.perform { try await ble.deleteClip(slot) }
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Replace sound")
+        }
+    }
+
+    private func begin(_ open: () -> Void) {
+        flow.slot = slot
+        open()
+    }
+}
+
+struct SoundsView: View {
+    @Environment(BLEManager.self) private var ble
+    @State private var flow = ClipFlow()
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(Clip.allCases) { kind in
+                    ClipSlotRow(slot: ClipSlot(targetID: nil, kind: kind), bytes: ble.info?.clipBytes(kind) ?? 0,
+                                flow: flow)
+                }
+            } header: {
+                Text("Default sounds")
+            } footer: {
+                Text("Used for every target that doesn't have its own sound.")
+            }
+            ForEach(ble.targets) { t in
+                Section("\(t.name)\(t.enabled ? "" : " (paused)")") {
+                    ForEach(Clip.allCases) { kind in
+                        ClipSlotRow(slot: ClipSlot(targetID: t.id, kind: kind), bytes: t.clipBytes(kind), flow: flow)
+                    }
+                }
+            }
+            Section {
+                if let info = ble.info {
+                    LabeledContent("Free space on device", value: formatBytes(info.freeBytes))
+                }
+            } footer: {
+                Text("Clips are converted to 16 kHz mono, trimmed, normalized and limited to \(Int(ClipConverter.maxSeconds)) seconds (about 32 KB per second). Short, punchy sounds work best on the tiny speaker. Set the volume in Settings.")
+            }
+        }
+        .navigationTitle("Sounds")
+        .clipFlowHost(flow)
     }
 }
 
@@ -112,7 +178,7 @@ struct ClipUploadSheet: View {
             List {
                 Section {
                     LabeledContent("Source", value: source.title)
-                    LabeledContent("Will play on", value: source.clip.title)
+                    LabeledContent("Will play as", value: slotDescription)
                 }
                 if let r = result {
                     Section {
@@ -133,7 +199,7 @@ struct ClipUploadSheet: View {
                         } else if done {
                             Label("Uploaded", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                             Button {
-                                ble.perform { try await ble.play(source.clip) }
+                                ble.perform { try await ble.play(source.slot) }
                             } label: {
                                 Label("Play on device", systemImage: "speaker.wave.2.fill")
                             }
@@ -154,7 +220,7 @@ struct ClipUploadSheet: View {
                     Section { ProgressView("Converting…") }
                 }
             }
-            .navigationTitle(source.clip.title)
+            .navigationTitle(source.slot.kind.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: done ? .confirmationAction : .cancellationAction) {
@@ -177,11 +243,16 @@ struct ClipUploadSheet: View {
         }
     }
 
+    private var slotDescription: String {
+        guard let id = source.slot.targetID else { return "Default \(source.slot.kind.shortTitle.lowercased()) sound" }
+        return "\(ble.targetName(id)) \(source.slot.kind.shortTitle.lowercased()) sound"
+    }
+
     private func upload(_ wav: Data) {
         uploading = true
         Task {
             do {
-                try await ble.upload(wav, to: source.clip)
+                try await ble.upload(wav, to: source.slot)
                 done = true
             } catch {
                 ble.lastError = error.localizedDescription

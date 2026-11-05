@@ -71,6 +71,15 @@ struct ScannerView: View {
                     Text("Power the Atom Echo from USB or a power bank and it shows up here within a few seconds.")
                 }
             }
+            Section {
+                Button {
+                    ble.startDemo()
+                } label: {
+                    Label("Try demo mode", systemImage: "sparkles")
+                }
+            } footer: {
+                Text("Explore the app with a simulated device. Also works in the iOS Simulator, which has no Bluetooth.")
+            }
         }
         .navigationTitle("Pranker")
         .onAppear { if ble.phase == .idle { ble.startScan() } }

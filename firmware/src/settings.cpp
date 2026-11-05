@@ -89,34 +89,19 @@ void settingsSave() {
     prefs.end();
 }
 
-bool irkLoad(uint8_t out[16]) {
-    prefs.begin(NS, true);
-    size_t n = prefs.isKey("irk") ? prefs.getBytes("irk", out, 16) : 0;
-    prefs.end();
-    return n == 16;
-}
-
-void irkSave(const uint8_t irk[16]) {
+void requestEnrollOnNextBoot(const char* targetName) {
     prefs.begin(NS, false);
-    prefs.putBytes("irk", irk, 16);
+    prefs.putString("enroll", targetName ? targetName : "Target");
     prefs.end();
 }
 
-void irkClear() {
+bool enrollRequested(String& targetName) {
     prefs.begin(NS, false);
-    prefs.remove("irk");
-    prefs.end();
-}
-
-void requestEnrollOnNextBoot(bool enable) {
-    prefs.begin(NS, false);
-    prefs.putBool("enroll", enable);
-    prefs.end();
-}
-
-bool enrollRequested() {
-    prefs.begin(NS, true);
-    bool v = prefs.isKey("enroll") && prefs.getBool("enroll", false);
+    bool v = prefs.isKey("enroll");
+    if (v) {
+        targetName = prefs.getString("enroll", "Target");
+        prefs.remove("enroll");  // one-shot, so a crash can't loop us into enrollment
+    }
     prefs.end();
     return v;
 }

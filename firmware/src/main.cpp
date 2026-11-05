@@ -1,6 +1,6 @@
 // Bluetooth Pranker firmware for the M5Stack Atom Echo.
 //
-// Plays a sound when a specific iPhone comes into range ("enter") or leaves
+// Plays a sound when one of the enrolled iPhones comes into range ("enter") or leaves
 // ("leave"). Configure and calibrate it with the iOS companion app.
 //
 // Button: short press = play the "enter" sound (test)
@@ -16,6 +16,7 @@
 #include "protocol.h"
 #include "rpa.h"
 #include "settings.h"
+#include "targets.h"
 
 void setup() {
     Serial.begin(115200);
@@ -30,11 +31,10 @@ void setup() {
 
     if (!LittleFS.begin(true)) Serial.println("LittleFS mount failed");
     settingsLoad();
+    targetsLoad();
 
-    if (enrollRequested()) {
-        requestEnrollOnNextBoot(false);  // one-shot, so a crash can't loop us here
-        enrollRun();
-    }
+    String enrollName;
+    if (enrollRequested(enrollName)) enrollRun(enrollName);
 
     audioBegin();
     appBegin();
@@ -52,10 +52,10 @@ void loop() {
             handled = true;
             ledSet(0, 0, 30);
             Serial.println("Long press: entering enrollment mode");
-            appStartEnrollment();
+            appStartEnrollment(nullptr);
         }
     } else {
-        if (downAt && !handled && now - downAt >= 30) appTestPlay(true);
+        if (downAt && !handled && now - downAt >= 30) appTestPlay(0, true);
         downAt  = 0;
         handled = false;
     }

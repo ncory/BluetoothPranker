@@ -1,8 +1,8 @@
 // BLE protocol shared with the iOS companion app (see ../../docs/PROTOCOL.md).
 #pragma once
 
-#define FW_VERSION "1.0.0"
-#define PROTOCOL_VERSION 1
+#define FW_VERSION "1.1.0"
+#define PROTOCOL_VERSION 2
 
 #define SVC_UUID       "b10e0000-7a5c-4f3b-9e2d-5c0ffee0b10e"
 #define CHR_CONFIG     "b10e0001-7a5c-4f3b-9e2d-5c0ffee0b10e"  // read/write JSON settings
@@ -10,6 +10,7 @@
 #define CHR_STATUS     "b10e0003-7a5c-4f3b-9e2d-5c0ffee0b10e"  // read/notify JSON status + events
 #define CHR_AUDIO      "b10e0004-7a5c-4f3b-9e2d-5c0ffee0b10e"  // write-without-response upload chunks
 #define CHR_LOG        "b10e0005-7a5c-4f3b-9e2d-5c0ffee0b10e"  // read JSON event log
+#define CHR_TARGETS    "b10e0006-7a5c-4f3b-9e2d-5c0ffee0b10e"  // read JSON target list
 
 // M5Stack Atom Echo pinout
 #define PIN_BUTTON   39

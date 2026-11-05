@@ -5,7 +5,9 @@
 #include <Arduino.h>
 #include <FS.h>
 
-enum Clip : uint8_t { CLIP_ENTER = 0, CLIP_LEAVE = 1 };
+// Clip ids used by the app: "enter" / "leave" are the defaults; "t<id>e" /
+// "t<id>l" are optional per-target overrides. Playback falls back
+// target clip -> default clip -> built-in jingle.
 
 struct WavInfo {
     uint32_t sampleRate = 0;
@@ -14,14 +16,14 @@ struct WavInfo {
     uint32_t dataBytes  = 0;
 };
 
-const char* clipPath(Clip c);
-const char* clipName(Clip c);
-bool        clipFromName(const char* name, Clip& out);
-size_t      clipBytes(Clip c);  // 0 => no upload, built-in sound is used
+String clipPathForId(int targetId, bool enter);  // targetId 0 = default
+inline String clipPathForTarget(int targetId, bool enter) { return clipPathForId(targetId, enter); }
+bool   clipIdParse(const char* s, int& targetId, bool& enter);
+size_t clipBytesPath(const String& path);  // 0 => no upload
 
 bool wavParse(fs::File& f, WavInfo& out);  // only 16-bit PCM, mono/stereo, 8-48 kHz
 
 void audioBegin();
-void audioPlay(Clip c);  // non-blocking
+void audioPlay(int targetId, bool enter);  // non-blocking
 void audioStop();
 bool audioBusy();

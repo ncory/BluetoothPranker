@@ -11,20 +11,31 @@
 #include "protocol.h"
 #include "rpa.h"
 #include "settings.h"
+#include "targets.h"
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 struct Sample {
+    uint8_t  targetId;
     int8_t   rssi;
     uint32_t ms;
 };
 
 struct LogEntry {
     uint32_t ms;
+    uint8_t  targetId;
     uint8_t  enter;
     uint8_t  played;
+};
+
+// Per-target runtime state, index-aligned with g_targets.
+struct Tracker {
+    RpaMatcher matcher;   // used only on the NimBLE host task
+    Presence   presence;  // guarded by s_lock
+    uint32_t   lastPlay   = 0;
+    bool       everPlayed = false;
 };
 
 static const int     LOG_MAX = 20;
@@ -32,25 +43,23 @@ static LogEntry      s_log[LOG_MAX];
 static int           s_logCount = 0, s_logNext = 0;
 
 static QueueHandle_t     s_samples;
-static SemaphoreHandle_t s_lock;  // guards settings, presence, log
-static RpaMatcher        s_matcher;
-static Presence          s_presence;
+static SemaphoreHandle_t s_lock;  // guards settings, targets, trackers' presence, log
+static Tracker           s_trackers[MAX_TARGETS];
 
 static NimBLEServer*         s_server;
 static NimBLEScan*           s_scan;
-static NimBLECharacteristic *s_chConfig, *s_chCommand, *s_chStatus, *s_chAudio, *s_chLog;
+static NimBLECharacteristic *s_chConfig, *s_chCommand, *s_chStatus, *s_chAudio, *s_chLog, *s_chTargets;
 static volatile uint16_t     s_conn = BLE_HS_CONN_HANDLE_NONE;
 
-static uint32_t      s_armStart   = 0;
-static uint32_t      s_lastPlay   = 0;
-static bool          s_everPlayed = false;
-static volatile bool s_infoDirty  = true;
-static uint32_t      s_rebootAt   = 0;
-static int           s_enrollRes  = 0;
+static uint32_t      s_armStart  = 0;
+static volatile bool s_infoDirty = true;
+static uint32_t      s_rebootAt  = 0;
+static int           s_enrollRes = 0;
+static volatile bool s_haveTargets = false;  // any enabled target (read by loop)
 
 static struct {
     bool     active = false;
-    Clip     clip;
+    String   path;
     uint32_t size = 0, crc = 0, received = 0, runningCrc = 0;
     File     file;
 } s_up;
@@ -75,10 +84,10 @@ static uint32_t crc32Update(uint32_t crc, const uint8_t* d, size_t n) {
     return ~crc;
 }
 
+// Never hold s_lock while calling into the BLE host.
 static void sendJson(JsonDocument& doc) {
     String s;
     serializeJson(doc, s);
-    // No s_lock here: never hold our lock while calling into the BLE host.
     s_chStatus->setValue(s);
     if (s_conn != BLE_HS_CONN_HANDLE_NONE) s_chStatus->notify();
 }
@@ -98,11 +107,24 @@ static uint32_t armRemainingMs(uint32_t now) {
     return el >= delay ? 0 : delay - el;
 }
 
-static uint32_t cooldownRemainingMs(uint32_t now) {
-    if (!s_everPlayed) return 0;
+static uint32_t cooldownRemainingMs(const Tracker& t, uint32_t now) {
+    if (!t.everPlayed) return 0;
     uint32_t cd = (uint32_t)settings.cooldownSec * 1000;
-    uint32_t el = now - s_lastPlay;
+    uint32_t el = now - t.lastPlay;
     return el >= cd ? 0 : cd - el;
+}
+
+// Re-sync matchers with the target list. Call with s_lock held, on the host
+// task (or before scanning starts).
+static void rebuildTrackers() {
+    bool any = false;
+    for (int i = 0; i < g_targetCount; i++) {
+        s_trackers[i].matcher.setIrk(g_targets[i].irk);
+        any |= g_targets[i].enabled;
+    }
+    for (int i = g_targetCount; i < MAX_TARGETS; i++) s_trackers[i].matcher.clear();
+    s_haveTargets = any;
+    s_infoDirty   = true;
 }
 
 static void setupAdvertising() {
@@ -122,7 +144,10 @@ static void setupAdvertising() {
 // Events
 // ---------------------------------------------------------------------------
 
-static void handleEvent(PresenceEvent e, uint32_t now) {
+// Call with s_lock held. Returns the event JSON to notify once the lock is released.
+static String handleEvent(int idx, PresenceEvent e, uint32_t now) {
+    Tracker&    tr     = s_trackers[idx];
+    int         id     = g_targets[idx].id;
     bool        enter  = e == PresenceEvent::Enter;
     bool        played = false;
     const char* why    = nullptr;
@@ -130,31 +155,33 @@ static void handleEvent(PresenceEvent e, uint32_t now) {
     if (!settings.armed) why = "disarmed";
     else if (armRemainingMs(now) > 0) why = "arming";
     else if (enter ? !settings.playEnter : !settings.playLeave) why = "off";
-    else if (cooldownRemainingMs(now) > 0) why = "cooldown";
+    else if (cooldownRemainingMs(tr, now) > 0) why = "cooldown";
     else if ((int)random(100) >= settings.chance) why = "chance";
     else if (audioBusy()) why = "busy";
     else {
-        audioPlay(enter ? CLIP_ENTER : CLIP_LEAVE);
-        s_lastPlay   = now;
-        s_everPlayed = true;
-        played       = true;
+        audioPlay(id, enter);
+        tr.lastPlay   = now;
+        tr.everPlayed = true;
+        played        = true;
     }
 
-    {
-        Lock l;
-        s_log[s_logNext] = {now, (uint8_t)enter, (uint8_t)played};
-        s_logNext        = (s_logNext + 1) % LOG_MAX;
-        if (s_logCount < LOG_MAX) s_logCount++;
-    }
+    s_log[s_logNext] = {now, (uint8_t)id, (uint8_t)enter, (uint8_t)played};
+    s_logNext        = (s_logNext + 1) % LOG_MAX;
+    if (s_logCount < LOG_MAX) s_logCount++;
 
-    Serial.printf("[event] %s played=%d %s\n", enter ? "ENTER" : "LEAVE", played, why ? why : "");
+    Serial.printf("[event] %s %s played=%d %s\n", g_targets[idx].name, enter ? "ENTER" : "LEAVE", played,
+                  why ? why : "");
 
     JsonDocument d;
     d["t"]      = "e";
+    d["id"]     = id;
+    d["n"]      = g_targets[idx].name;
     d["ev"]     = enter ? "enter" : "leave";
     d["played"] = played;
     if (why) d["why"] = why;
-    sendJson(d);
+    String s;
+    serializeJson(d, s);
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,23 +198,33 @@ static void uploadAbort(const char* why) {
     if (why) ack("upload", false, why);
 }
 
+// Validates a clip id from the app and checks the target exists.
+static bool resolveClip(const char* clipId, int& targetId, bool& enter) {
+    if (!clipIdParse(clipId, targetId, enter)) return false;
+    if (targetId == 0) return true;
+    Lock l;
+    return targetIndexById(targetId) >= 0;
+}
+
 static void uploadBegin(JsonDocument& doc) {
     if (s_up.active) uploadAbort(nullptr);
-    Clip c;
-    if (!clipFromName(doc["clip"].as<const char*>(), c)) return ack("upload", false, "bad clip");
+    int  targetId;
+    bool enter;
+    if (!resolveClip(doc["clip"].as<const char*>(), targetId, enter)) return ack("upload", false, "bad clip");
     uint32_t size = doc["size"] | 0u;
     uint32_t crc  = doc["crc"] | 0u;
     if (size < 44 || size > MAX_CLIP_BYTES) return ack("upload", false, "bad size");
 
-    size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes() + clipBytes(c);
-    if (size + 16 * 1024 > freeBytes) return ack("upload", false, "not enough space");
+    String path      = clipPathForId(targetId, enter);
+    size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes() + clipBytesPath(path);
+    if (size + 16 * 1024 > freeBytes) return ack("upload", false, "not enough space on the device");
 
     // Remove the old clip first so its space is available.
-    LittleFS.remove(clipPath(c));
+    LittleFS.remove(path);
     s_up.file = LittleFS.open("/upload.tmp", "w");
     if (!s_up.file) return ack("upload", false, "fs error");
     s_up.active     = true;
-    s_up.clip       = c;
+    s_up.path       = path;
     s_up.size       = size;
     s_up.crc        = crc;
     s_up.received   = 0;
@@ -200,6 +237,7 @@ static void uploadFinish() {
     s_up.file.close();
     s_up.active = false;
     s_infoDirty = true;
+    g_targetsVersion++;  // clip sizes are part of the target list
 
     if (s_up.runningCrc != s_up.crc) {
         LittleFS.remove("/upload.tmp");
@@ -213,7 +251,7 @@ static void uploadFinish() {
         LittleFS.remove("/upload.tmp");
         return ack("uploadDone", false, "not a 16-bit PCM wav");
     }
-    LittleFS.rename("/upload.tmp", clipPath(s_up.clip));
+    LittleFS.rename("/upload.tmp", s_up.path);
     ack("uploadDone", true);
 }
 
@@ -241,33 +279,70 @@ static void handleCommand(const uint8_t* data, size_t len) {
     JsonDocument doc;
     if (deserializeJson(doc, data, len)) return ack("?", false, "bad json");
     const char* cmd = doc["cmd"] | "";
+    int         id  = doc["id"] | -1;
     Serial.printf("[cmd] %s\n", cmd);
 
     if (!strcmp(cmd, "play")) {
-        Clip c = CLIP_ENTER;
-        clipFromName(doc["clip"].as<const char*>(), c);
-        audioPlay(c);
+        int  targetId = 0;
+        bool enter    = true;
+        if (!resolveClip(doc["clip"] | "enter", targetId, enter)) return ack(cmd, false, "bad clip");
+        audioPlay(targetId, enter);
         ack(cmd, true);
     } else if (!strcmp(cmd, "stop")) {
         audioStop();
         ack(cmd, true);
     } else if (!strcmp(cmd, "enroll")) {
+        const char* name = doc["name"] | "Target";
+        bool        full;
+        {
+            Lock l;
+            full = g_targetCount >= MAX_TARGETS;
+        }
+        if (full) return ack(cmd, false, "target list is full, remove one first");
         ack(cmd, true);
-        appStartEnrollment();
-    } else if (!strcmp(cmd, "forget")) {
-        Lock l;
-        irkClear();
-        s_matcher.clear();
-        s_presence.reset();
-        s_infoDirty = true;
-        ack(cmd, true);
+        appStartEnrollment(name);
+    } else if (!strcmp(cmd, "removeTarget")) {
+        bool ok;
+        {
+            Lock l;
+            int  idx = targetIndexById(id);
+            ok       = idx >= 0;
+            if (ok) {
+                // Keep trackers aligned with the shifted target list.
+                for (int j = idx; j < g_targetCount - 1; j++) s_trackers[j] = s_trackers[j + 1];
+                s_trackers[g_targetCount - 1] = Tracker();
+                targetRemove(id);
+                rebuildTrackers();
+            }
+        }
+        ack(cmd, ok, ok ? nullptr : "no such target");
+    } else if (!strcmp(cmd, "renameTarget")) {
+        bool ok;
+        {
+            Lock l;
+            ok = targetRename(id, doc["name"] | "");
+            s_infoDirty = true;
+        }
+        ack(cmd, ok, ok ? nullptr : "no such target");
+    } else if (!strcmp(cmd, "enableTarget")) {
+        bool ok;
+        {
+            Lock l;
+            ok = targetSetEnabled(id, doc["on"] | true);
+            int idx = targetIndexById(id);
+            if (ok && !g_targets[idx].enabled) s_trackers[idx].presence.reset();
+            rebuildTrackers();
+        }
+        ack(cmd, ok, ok ? nullptr : "no such target");
     } else if (!strcmp(cmd, "upload")) {
         uploadBegin(doc);
     } else if (!strcmp(cmd, "delete")) {
-        Clip c;
-        if (!clipFromName(doc["clip"].as<const char*>(), c)) return ack(cmd, false, "bad clip");
-        LittleFS.remove(clipPath(c));
+        int  targetId;
+        bool enter;
+        if (!resolveClip(doc["clip"].as<const char*>(), targetId, enter)) return ack(cmd, false, "bad clip");
+        LittleFS.remove(clipPathForId(targetId, enter));
         s_infoDirty = true;
+        g_targetsVersion++;
         ack(cmd, true);
     } else if (!strcmp(cmd, "hide")) {
         // Restart the silent arming period, e.g. right before hiding the device.
@@ -275,8 +350,10 @@ static void handleCommand(const uint8_t* data, size_t len) {
         s_armStart = millis();
         ack(cmd, true);
     } else if (!strcmp(cmd, "clearLog")) {
-        Lock l;
-        s_logCount = s_logNext = 0;
+        {
+            Lock l;
+            s_logCount = s_logNext = 0;
+        }
         ack(cmd, true);
     } else if (!strcmp(cmd, "reboot")) {
         ack(cmd, true);
@@ -343,17 +420,18 @@ class AudioCB : public NimBLECharacteristicCallbacks {
 
 class LogCB : public NimBLECharacteristicCallbacks {
     void onRead(NimBLECharacteristic* c, NimBLEConnInfo&) override {
-        // {"now":<ms>,"ev":[[ms,enter,played],...]} oldest first. The app turns
-        // the ms values into wall-clock times using "now".
+        // {"now":<ms>,"ev":[[ms,targetId,enter,played],...]} oldest first. The
+        // app turns the ms values into wall-clock times using "now".
         JsonDocument d;
         Lock         l;
-        d["now"]      = millis();
-        JsonArray arr = d["ev"].to<JsonArray>();
+        d["now"]        = millis();
+        JsonArray arr   = d["ev"].to<JsonArray>();
         int       start = (s_logNext - s_logCount + LOG_MAX) % LOG_MAX;
         for (int i = 0; i < s_logCount; i++) {
             const LogEntry& e = s_log[(start + i) % LOG_MAX];
             JsonArray       a = arr.add<JsonArray>();
             a.add(e.ms);
+            a.add(e.targetId);
             a.add(e.enter);
             a.add(e.played);
         }
@@ -363,12 +441,24 @@ class LogCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+class TargetsCB : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+        Lock l;
+        c->setValue(targetsJson());
+    }
+};
+
 class ScanCB : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice* dev) override {
         const NimBLEAddress& a = dev->getAddress();
-        if (s_matcher.matches(a.getType(), a.getVal())) {
-            Sample s{(int8_t)dev->getRSSI(), millis()};
-            xQueueSend(s_samples, &s, 0);
+        if (!isResolvableAddress(a.getType(), a.getVal())) return;
+        // Target list changes also happen on this (host) task, so no lock needed.
+        for (int i = 0; i < g_targetCount; i++) {
+            if (g_targets[i].enabled && s_trackers[i].matcher.matches(a.getType(), a.getVal())) {
+                Sample s{g_targets[i].id, (int8_t)dev->getRSSI(), millis()};
+                xQueueSend(s_samples, &s, 0);
+                return;
+            }
         }
     }
 };
@@ -377,26 +467,20 @@ class ScanCB : public NimBLEScanCallbacks {
 // Public
 // ---------------------------------------------------------------------------
 
-void appStartEnrollment() {
-    requestEnrollOnNextBoot(true);
+void appStartEnrollment(const char* targetName) {
+    requestEnrollOnNextBoot(targetName && *targetName ? targetName : "Target");
     s_rebootAt = millis() + 600;
 }
 
-void appTestPlay(bool enter) { audioPlay(enter ? CLIP_ENTER : CLIP_LEAVE); }
+void appTestPlay(int targetId, bool enter) { audioPlay(targetId, enter); }
 
 void appBegin() {
     s_lock      = xSemaphoreCreateRecursiveMutex();
     s_samples   = xQueueCreate(64, sizeof(Sample));
     s_armStart  = millis();
     s_enrollRes = enrollResultGet();
-
-    uint8_t irk[16];
-    if (irkLoad(irk)) {
-        s_matcher.setIrk(irk);
-        Serial.println("[app] target IRK loaded");
-    } else {
-        Serial.println("[app] no target enrolled yet");
-    }
+    rebuildTrackers();
+    Serial.printf("[app] %d target(s) enrolled\n", g_targetCount);
 
     NimBLEDevice::init(settings.name.c_str());
     NimBLEDevice::setPower(9);  // dBm, max
@@ -414,10 +498,12 @@ void appBegin() {
     s_chStatus  = svc->createCharacteristic(CHR_STATUS, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY, 512);
     s_chAudio   = svc->createCharacteristic(CHR_AUDIO, NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE, 512);
     s_chLog     = svc->createCharacteristic(CHR_LOG, NIMBLE_PROPERTY::READ, 512);
+    s_chTargets = svc->createCharacteristic(CHR_TARGETS, NIMBLE_PROPERTY::READ, 512);
     s_chConfig->setCallbacks(new ConfigCB());
     s_chCommand->setCallbacks(new CommandCB());
     s_chAudio->setCallbacks(new AudioCB());
     s_chLog->setCallbacks(new LogCB());
+    s_chTargets->setCallbacks(new TargetsCB());
     s_chConfig->setValue(settingsToJson());
     s_chStatus->setValue("{}");
     s_server->start();
@@ -435,23 +521,44 @@ void appBegin() {
     Serial.printf("[app] ready, BLE address %s\n", NimBLEDevice::getAddress().toString().c_str());
 }
 
-static void sendStatus(uint32_t now) {
-    JsonDocument d;
+// Per-target presence: {"t":"p","id":1,"st":1,"r":-60,"s":-61.2,"age":120,"pps":1.2,"cd":0}
+static void sendTargetStatus(uint32_t now) {
+    JsonDocument docs[MAX_TARGETS];
+    int          n = 0;
     {
         Lock l;
-        d["t"]  = "s";
-        d["st"] = s_presence.present() ? 1 : 0;
-        if (s_presence.everSeen()) {
-            d["r"]   = s_presence.lastRssi();
-            d["age"] = s_presence.msSinceSeen(now);
+        for (int i = 0; i < g_targetCount; i++) {
+            if (!g_targets[i].enabled) continue;
+            const Presence& p = s_trackers[i].presence;
+            JsonDocument&   d = docs[n++];
+            d["t"]            = "p";
+            d["id"]           = g_targets[i].id;
+            d["st"]           = p.present() ? 1 : 0;
+            if (p.everSeen()) {
+                d["r"]   = p.lastRssi();
+                d["age"] = p.msSinceSeen(now);
+            }
+            if (p.hasSmoothed()) d["s"] = serialized(String(p.smoothed(), 1));
+            d["pps"] = serialized(String(p.packetsPerSec(), 1));
+            d["cd"]  = (cooldownRemainingMs(s_trackers[i], now) + 999) / 1000;
         }
-        if (s_presence.hasSmoothed()) d["s"] = serialized(String(s_presence.smoothed(), 1));
-        d["pps"] = serialized(String(s_presence.packetsPerSec(), 1));
+    }
+    for (int i = 0; i < n; i++) sendJson(docs[i]);
+}
+
+// Global status: {"t":"s","any":1,"cr":-55,"wait":0,"busy":0,"up":..,"upT":..}
+static void sendStatus(uint32_t now) {
+    JsonDocument d;
+    d["t"] = "s";
+    {
+        Lock l;
+        bool any = false;
+        for (int i = 0; i < g_targetCount; i++) any |= g_targets[i].enabled && s_trackers[i].presence.present();
+        d["any"] = any ? 1 : 0;
     }
     int8_t cr;
     if (s_conn != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_rssi(s_conn, &cr) == 0 && cr != 127) d["cr"] = cr;
     d["wait"] = (armRemainingMs(now) + 999) / 1000;
-    d["cd"]   = (cooldownRemainingMs(now) + 999) / 1000;
     d["busy"] = audioBusy() ? 1 : 0;
     if (s_up.active) {
         d["up"]  = s_up.received;
@@ -465,9 +572,14 @@ static void sendInfo(uint32_t now) {
     d["t"]    = "i";
     d["v"]    = PROTOCOL_VERSION;
     d["fw"]   = FW_VERSION;
-    d["irk"]  = s_matcher.hasIrk();
-    d["ce"]   = clipBytes(CLIP_ENTER);
-    d["cl"]   = clipBytes(CLIP_LEAVE);
+    {
+        Lock l;
+        d["nt"] = g_targetCount;
+        d["tv"] = g_targetsVersion;
+    }
+    d["max"]  = MAX_TARGETS;
+    d["ce"]   = clipBytesPath(clipPathForId(0, true));
+    d["cl"]   = clipBytesPath(clipPathForId(0, false));
     d["free"] = LittleFS.totalBytes() - LittleFS.usedBytes();
     d["er"]   = s_enrollRes;
     d["upt"]  = now / 1000;
@@ -475,34 +587,49 @@ static void sendInfo(uint32_t now) {
 }
 
 static void updateLed(uint32_t now) {
-    if (!s_matcher.hasIrk()) {
+    if (!s_haveTargets) {
         // Not set up yet: short yellow blink every 3 s.
         bool on = (now % 3000) < 120;
         on ? ledSet(20, 12, 0) : ledOff();
-    } else if (settings.led) {
-        s_presence.present() ? ledSet(0, 20, 0) : ledSet(20, 0, 0);
-    } else {
-        ledOff();
+        return;
     }
+    if (!settings.led) return ledOff();
+    bool any = false;
+    {
+        Lock l;
+        for (int i = 0; i < g_targetCount; i++) any |= g_targets[i].enabled && s_trackers[i].presence.present();
+    }
+    any ? ledSet(0, 20, 0) : ledSet(20, 0, 0);
 }
 
 void appLoop() {
     uint32_t now = millis();
 
-    Sample s;
-    while (xQueueReceive(s_samples, &s, 0) == pdTRUE) {
-        Lock l;
-        s_presence.addSample(s.rssi, s.ms);
-    }
-    PresenceEvent e;
+    // Feed samples and evaluate presence for every target.
+    String events[MAX_TARGETS];
+    int    nEvents = 0;
     {
-        Lock l;
-        e = s_presence.update(now);
+        Lock   l;
+        Sample s;
+        while (xQueueReceive(s_samples, &s, 0) == pdTRUE) {
+            int idx = targetIndexById(s.targetId);
+            if (idx >= 0) s_trackers[idx].presence.addSample(s.rssi, s.ms);
+        }
+        for (int i = 0; i < g_targetCount; i++) {
+            if (!g_targets[i].enabled) continue;
+            PresenceEvent e = s_trackers[i].presence.update(now);
+            if (e == PresenceEvent::None) continue;
+            events[nEvents++] = handleEvent(i, e, now);
+        }
     }
-    if (e != PresenceEvent::None) handleEvent(e, now);
+    // Notify outside the lock.
+    for (int i = 0; i < nEvents; i++) {
+        s_chStatus->setValue(events[i]);
+        if (s_conn != BLE_HS_CONN_HANDLE_NONE) s_chStatus->notify();
+    }
 
-    if (s_matcher.hasIrk() && !s_scan->isScanning()) s_scan->start(0, false, true);
-    if (!s_matcher.hasIrk() && s_scan->isScanning()) s_scan->stop();
+    if (s_haveTargets && !s_scan->isScanning()) s_scan->start(0, false, true);
+    if (!s_haveTargets && s_scan->isScanning()) s_scan->stop();
 
     static uint32_t lastStatus = 0, lastInfo = 0;
     if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
@@ -513,6 +640,7 @@ void appLoop() {
         }
         if (now - lastStatus >= 500) {
             lastStatus = now;
+            sendTargetStatus(now);  // per-target first; the global status closes the tick
             sendStatus(now);
         }
     }

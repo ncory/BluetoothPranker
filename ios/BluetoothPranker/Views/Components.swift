@@ -76,7 +76,7 @@ struct EventRow: View {
                 .foregroundStyle(event.enter ? .green : .orange)
                 .frame(width: 28)
             VStack(alignment: .leading) {
-                Text(event.enter ? "Arrived" : "Left")
+                Text("\(event.targetName) \(event.enter ? "arrived" : "left")")
                 Text(event.played ? "Played the \(event.enter ? "enter" : "leave") sound"
                                   : "Silent: \(event.reasonText ?? "skipped")")
                     .font(.caption)
@@ -87,6 +87,36 @@ struct EventRow: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// One line per target: presence dot, name, state, signal.
+struct TargetRow: View {
+    let target: TargetInfo
+    let status: TargetStatus?
+
+    private var state: (String, Color) {
+        guard target.enabled else { return ("Paused", .gray) }
+        guard let s = status else { return ("Waiting…", .gray) }
+        if s.present { return ("In range", .green) }
+        if s.hearing { return ("Nearby, not in range", .yellow) }
+        return (s.everSeen ? "Not detected" : "Not heard yet", .gray)
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle().fill(state.1).frame(width: 12, height: 12)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(target.name).font(.headline)
+                Text(state.0).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if target.enabled, let s = status, s.hearing, let sm = s.smoothed {
+                Text("\(Int(sm.rounded())) dBm").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                SignalBars(rssi: Int(sm))
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

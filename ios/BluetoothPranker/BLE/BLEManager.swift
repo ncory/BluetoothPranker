@@ -9,6 +9,7 @@ enum PrankerUUID {
     static let status  = CBUUID(string: "B10E0003-7A5C-4F3B-9E2D-5C0FFEE0B10E")
     static let audio   = CBUUID(string: "B10E0004-7A5C-4F3B-9E2D-5C0FFEE0B10E")
     static let log     = CBUUID(string: "B10E0005-7A5C-4F3B-9E2D-5C0FFEE0B10E")
+    static let targets = CBUUID(string: "B10E0006-7A5C-4F3B-9E2D-5C0FFEE0B10E")
 }
 
 struct DiscoveredDevice: Identifiable {
@@ -34,7 +35,8 @@ enum BLEError: LocalizedError {
 }
 
 /// Talks to the Pranker firmware over Bluetooth LE. Everything runs on the main
-/// queue/actor, so SwiftUI can observe it directly.
+/// queue/actor, so SwiftUI can observe it directly. See DemoMode.swift for the
+/// simulated device used in the simulator and for screenshots.
 @Observable
 @MainActor
 final class BLEManager: NSObject {
@@ -45,21 +47,25 @@ final class BLEManager: NSObject {
         case connected
     }
 
-    private(set) var phase: Phase = .idle
-    private(set) var devices: [DiscoveredDevice] = []
-    private(set) var deviceName = ""
-    private(set) var config: DeviceConfig?
-    private(set) var status: DeviceStatus?
-    private(set) var statusSeq = 0
-    private(set) var info: DeviceInfo?
-    private(set) var history: [RSSIPoint] = []
-    private(set) var events: [DeviceEvent] = []
-    private(set) var log: [LogEntry] = []
-    private(set) var uploadProgress: Double?
+    // Setters are internal (not private) so DemoMode.swift can drive them.
+    var phase: Phase = .idle
+    var devices: [DiscoveredDevice] = []
+    var deviceName = ""
+    var config: DeviceConfig?
+    var status: DeviceStatus?
+    var targets: [TargetInfo] = []
+    var targetStatus: [Int: TargetStatus] = [:]
+    var statusSeq = 0
+    var info: DeviceInfo?
+    var history: [RSSIPoint] = []
+    var events: [DeviceEvent] = []
+    var log: [LogEntry] = []
+    var uploadProgress: Double?
     var lastError: String?
+    var isDemo = false
 
-    /// This phone's connection RSSI, smoothed like the firmware smooths the target.
-    private(set) var phoneSmoothed: Double?
+    /// This phone's connection RSSI, smoothed like the firmware smooths targets.
+    var phoneSmoothed: Double?
 
     @ObservationIgnored private var central: CBCentralManager!
     @ObservationIgnored private var peripheral: CBPeripheral?
@@ -68,19 +74,27 @@ final class BLEManager: NSObject {
     @ObservationIgnored private var ackBuffer: [String: Ack] = [:]
     @ObservationIgnored private var writeWaiters: [(id: UUID, cont: CheckedContinuation<Void, Never>)] = []
     @ObservationIgnored private var userDisconnected = false
+    @ObservationIgnored private var lastTargetsVersion = -1
+    @ObservationIgnored var demo: DemoDevice?
 
     private let lastDeviceKey = "lastDeviceID"
-    private let historySeconds: TimeInterval = 120
+    let historySeconds: TimeInterval = 120
 
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
+    func targetName(_ id: Int) -> String {
+        targets.first { $0.id == id }?.name ?? "Target \(id)"
+    }
+
+    var enabledTargets: [TargetInfo] { targets.filter(\.enabled) }
+
     // MARK: - Scanning / connecting
 
     func startScan() {
-        guard central.state == .poweredOn else { return }
+        guard central.state == .poweredOn, !isDemo else { return }
         devices.removeAll()
         phase = .scanning
         central.scanForPeripherals(withServices: [PrankerUUID.service],
@@ -109,6 +123,10 @@ final class BLEManager: NSObject {
 
     /// Disconnects and forgets the device (no auto-reconnect).
     func disconnect() {
+        if isDemo {
+            stopDemo()
+            return
+        }
         userDisconnected = true
         UserDefaults.standard.removeObject(forKey: lastDeviceKey)
         if let p = peripheral { central.cancelPeripheralConnection(p) }
@@ -118,14 +136,19 @@ final class BLEManager: NSObject {
         startScan()
     }
 
-    private func resetSession() {
+    func resetSession() {
         chars = [:]
         config = nil
         status = nil
         info = nil
+        targets = []
+        targetStatus = [:]
         history = []
+        events = []
+        log = []
         phoneSmoothed = nil
         uploadProgress = nil
+        lastTargetsVersion = -1
         ackBuffer = [:]
         for (_, list) in ackWaiters { list.forEach { $0.cont.resume(throwing: BLEError.notConnected) } }
         ackWaiters = [:]
@@ -144,6 +167,7 @@ final class BLEManager: NSObject {
 
     @discardableResult
     func command(_ body: [String: Any], timeout: Double = 5) async throws -> Ack {
+        if let demo { return try await demo.handle(body, on: self) }
         guard phase == .connected, let p = peripheral, let ch = chars[PrankerUUID.command] else {
             throw BLEError.notConnected
         }
@@ -156,25 +180,43 @@ final class BLEManager: NSObject {
         return ack
     }
 
-    func play(_ clip: Clip) async throws { try await command(["cmd": "play", "clip": clip.rawValue]) }
+    func play(_ slot: ClipSlot) async throws { try await command(["cmd": "play", "clip": slot.wireID]) }
     func stopSound() async throws { try await command(["cmd": "stop"]) }
     func restartHideTimer() async throws { try await command(["cmd": "hide"]) }
-    func forgetTarget() async throws { try await command(["cmd": "forget"]) }
-    func deleteClip(_ clip: Clip) async throws { try await command(["cmd": "delete", "clip": clip.rawValue]) }
+    func deleteClip(_ slot: ClipSlot) async throws { try await command(["cmd": "delete", "clip": slot.wireID]) }
     func reboot() async throws { try await command(["cmd": "reboot"]) }
+
+    func removeTarget(_ id: Int) async throws {
+        try await command(["cmd": "removeTarget", "id": id])
+        refreshTargets()
+    }
+
+    func renameTarget(_ id: Int, to name: String) async throws {
+        try await command(["cmd": "renameTarget", "id": id, "name": name])
+        refreshTargets()
+    }
+
+    func setTarget(_ id: Int, enabled: Bool) async throws {
+        try await command(["cmd": "enableTarget", "id": id, "on": enabled])
+        refreshTargets()
+    }
 
     func clearLog() async throws {
         try await command(["cmd": "clearLog"])
         log = []
     }
 
-    /// Reboots the device into "keyboard" pairing mode. It drops the connection;
-    /// we reconnect automatically when it comes back in normal mode.
-    func startEnrollment() async throws {
-        try await command(["cmd": "enroll"])
+    /// Reboots the device into "keyboard" pairing mode for a new target. It
+    /// drops the connection; we reconnect automatically when it comes back.
+    func startEnrollment(name: String) async throws {
+        try await command(["cmd": "enroll", "name": name])
     }
 
     func saveConfig(_ newConfig: DeviceConfig) async throws {
+        if isDemo {
+            config = newConfig
+            return
+        }
         guard phase == .connected, let p = peripheral, let ch = chars[PrankerUUID.config] else {
             throw BLEError.notConnected
         }
@@ -194,18 +236,24 @@ final class BLEManager: NSObject {
     }
 
     func refreshLog() {
-        guard let p = peripheral, let ch = chars[PrankerUUID.log] else { return }
+        guard !isDemo, let p = peripheral, let ch = chars[PrankerUUID.log] else { return }
+        p.readValue(for: ch)
+    }
+
+    func refreshTargets() {
+        guard !isDemo, let p = peripheral, let ch = chars[PrankerUUID.targets] else { return }
         p.readValue(for: ch)
     }
 
     /// Streams a WAV file to the device. Chunks are [UInt32 LE offset][bytes].
-    func upload(_ wav: Data, to clip: Clip) async throws {
+    func upload(_ wav: Data, to slot: ClipSlot) async throws {
+        if let demo { return try await demo.upload(wav, to: slot, on: self) }
         guard let p = peripheral, let audio = chars[PrankerUUID.audio] else { throw BLEError.notConnected }
         let wav = Data(wav)  // make sure indices start at 0
         uploadProgress = 0
         defer { uploadProgress = nil }
 
-        try await command(["cmd": "upload", "clip": clip.rawValue, "size": wav.count, "crc": CRC32.checksum(wav)])
+        try await command(["cmd": "upload", "clip": slot.wireID, "size": wav.count, "crc": CRC32.checksum(wav)])
         ackBuffer["uploadDone"] = nil
 
         let chunk = max(16, p.maximumWriteValueLength(for: .withoutResponse) - 4)
@@ -231,6 +279,7 @@ final class BLEManager: NSObject {
 
         let done = try await waitForAck("uploadDone", timeout: 20)
         if !done.ok { throw BLEError.device(done.error ?? "upload failed") }
+        refreshTargets()
     }
 
     // MARK: - Ack plumbing
@@ -287,35 +336,53 @@ final class BLEManager: NSObject {
         }
     }
 
-    // MARK: - Incoming data
+    // MARK: - Incoming data (also used by demo mode)
+
+    /// Global status arrives after the per-target ones each tick, so it closes
+    /// out one history sample.
+    func applyStatus(_ s: DeviceStatus) {
+        status = s
+        statusSeq += 1
+        if let cr = s.phoneRSSI {
+            let alpha = config?.smoothing ?? 0.3
+            phoneSmoothed = phoneSmoothed.map { $0 + alpha * (Double(cr) - $0) } ?? Double(cr)
+        }
+        let now = Date()
+        var point = RSSIPoint(date: now, phone: phoneSmoothed)
+        for (id, t) in targetStatus {
+            if t.hearing, let sm = t.smoothed { point.smoothed[id] = sm }
+            if (t.msSinceSeen ?? .max) < 1500, let r = t.lastRSSI { point.raw[id] = Double(r) }
+        }
+        history.append(point)
+        history.removeAll { now.timeIntervalSince($0.date) > historySeconds }
+    }
+
+    func applyEvent(_ e: DeviceEvent) {
+        events.insert(e, at: 0)
+        if events.count > 50 { events.removeLast(events.count - 50) }
+    }
 
     private func handleStatusMessage(_ data: Data) {
         guard let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let type = d["t"] as? String else { return }
         switch type {
         case "s":
-            let s = DeviceStatus(json: d)
-            status = s
-            statusSeq += 1
-            if let cr = s.phoneRSSI {
-                let alpha = config?.smoothing ?? 0.3
-                phoneSmoothed = phoneSmoothed.map { $0 + alpha * (Double(cr) - $0) } ?? Double(cr)
-            }
-            let now = Date()
-            history.append(RSSIPoint(
-                date: now,
-                target: s.hearingTarget ? s.smoothed : nil,
-                targetRaw: (s.msSinceSeen ?? .max) < 1500 ? s.lastRSSI.map { Double($0) } : nil,
-                phone: phoneSmoothed))
-            history.removeAll { now.timeIntervalSince($0.date) > historySeconds }
+            applyStatus(DeviceStatus(json: d))
+        case "p":
+            if let t = TargetStatus(json: d) { targetStatus[t.id] = t }
         case "i":
-            info = DeviceInfo(json: d)
+            let i = DeviceInfo(json: d)
+            info = i
+            if i.targetsVersion != lastTargetsVersion {
+                lastTargetsVersion = i.targetsVersion
+                refreshTargets()
+            }
         case "e":
-            let e = DeviceEvent(date: Date(), enter: d["ev"] as? String == "enter",
-                                played: (d["played"] as? NSNumber)?.boolValue ?? false,
-                                reason: d["why"] as? String)
-            events.insert(e, at: 0)
-            if events.count > 50 { events.removeLast(events.count - 50) }
+            let id = (d["id"] as? NSNumber)?.intValue ?? 0
+            applyEvent(DeviceEvent(date: Date(), targetID: id, targetName: d["n"] as? String ?? targetName(id),
+                                   enter: d["ev"] as? String == "enter",
+                                   played: (d["played"] as? NSNumber)?.boolValue ?? false,
+                                   reason: d["why"] as? String))
         case "ack":
             deliver(Ack(cmd: d["cmd"] as? String ?? "?",
                         ok: (d["ok"] as? NSNumber)?.boolValue ?? false,
@@ -331,23 +398,32 @@ final class BLEManager: NSObject {
               let rows = d["ev"] as? [[NSNumber]] else { return }
         let readAt = Date()
         log = rows.compactMap { r -> LogEntry? in
-            guard r.count >= 3 else { return nil }
+            guard r.count >= 4 else { return nil }
             let ageSec = (now - r[0].doubleValue) / 1000
-            return LogEntry(date: readAt.addingTimeInterval(-ageSec), enter: r[1].boolValue, played: r[2].boolValue)
+            return LogEntry(date: readAt.addingTimeInterval(-ageSec), targetID: r[1].intValue,
+                            enter: r[2].boolValue, played: r[3].boolValue)
         }.reversed()
+    }
+
+    private func handleTargets(_ data: Data) {
+        guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
+        targets = rows.compactMap { TargetInfo(json: $0) }
+        let ids = Set(targets.map(\.id))
+        targetStatus = targetStatus.filter { ids.contains($0.key) }
     }
 
     // MARK: - Delegate handlers (main actor)
 
     private func handleStateUpdate() {
+        guard !isDemo else { return }
         switch central.state {
         case .poweredOn:
             if let p = peripheral, p.state != .connected {
                 phase = .connecting(deviceName)
                 central.connect(p)
             } else if peripheral == nil, let idString = UserDefaults.standard.string(forKey: lastDeviceKey),
-               let id = UUID(uuidString: idString),
-               let known = central.retrievePeripherals(withIdentifiers: [id]).first {
+                      let id = UUID(uuidString: idString),
+                      let known = central.retrievePeripherals(withIdentifiers: [id]).first {
                 connect(known, name: known.name)  // pends until the device is in range
             } else if peripheral == nil {
                 startScan()
@@ -377,7 +453,7 @@ final class BLEManager: NSObject {
         p.discoverServices([PrankerUUID.service])
     }
 
-    private func handleDisconnected(_ p: CBPeripheral, error: Error?) {
+    private func handleDisconnected(_ p: CBPeripheral) {
         guard p == peripheral else { return }
         resetSession()
         if userDisconnected {
@@ -390,15 +466,29 @@ final class BLEManager: NSObject {
         central.connect(p)
     }
 
+    private func handleFailedConnect(_ p: CBPeripheral, message: String) {
+        guard p == peripheral else { return }
+        lastError = message
+        peripheral = nil
+        resetSession()
+        phase = .idle
+        startScan()
+    }
+
     private func handleCharacteristics(_ p: CBPeripheral, _ service: CBService) {
         for c in service.characteristics ?? [] { chars[c.uuid] = c }
-        guard let status = chars[PrankerUUID.status], let config = chars[PrankerUUID.config] else {
+        guard let statusChar = chars[PrankerUUID.status], let configChar = chars[PrankerUUID.config] else {
             lastError = "This doesn't look like a Pranker device (missing characteristics)."
             return
         }
-        p.setNotifyValue(true, for: status)
-        p.readValue(for: config)
-        if let log = chars[PrankerUUID.log] { p.readValue(for: log) }
+        guard chars[PrankerUUID.targets] != nil else {
+            lastError = "The device runs older firmware. Please re-flash it."
+            return
+        }
+        p.setNotifyValue(true, for: statusChar)
+        p.readValue(for: configChar)
+        refreshTargets()
+        refreshLog()
         phase = .connected
     }
 
@@ -414,6 +504,8 @@ final class BLEManager: NSObject {
             }
         case PrankerUUID.log:
             handleLog(data)
+        case PrankerUUID.targets:
+            handleTargets(data)
         default:
             break
         }
@@ -440,19 +532,12 @@ extension BLEManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
                                     error: Error?) {
         let message = error?.localizedDescription ?? "Couldn't connect."
-        MainActor.assumeIsolated {
-            guard peripheral == self.peripheral else { return }
-            self.lastError = message
-            self.peripheral = nil
-            self.resetSession()
-            self.phase = .idle
-            self.startScan()
-        }
+        MainActor.assumeIsolated { self.handleFailedConnect(peripheral, message: message) }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                                     error: Error?) {
-        MainActor.assumeIsolated { self.handleDisconnected(peripheral, error: error) }
+        MainActor.assumeIsolated { self.handleDisconnected(peripheral) }
     }
 }
 

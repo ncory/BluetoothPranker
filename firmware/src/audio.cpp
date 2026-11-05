@@ -13,19 +13,34 @@ static i2s_chan_handle_t s_tx   = nullptr;
 static const int FRAMES = 256;
 static int16_t   s_out[FRAMES * 2];  // stereo frames
 
-const char* clipPath(Clip c) { return c == CLIP_ENTER ? "/enter.wav" : "/leave.wav"; }
-const char* clipName(Clip c) { return c == CLIP_ENTER ? "enter" : "leave"; }
+struct PlayReq {
+    uint8_t targetId;
+    bool    enter;
+};
 
-bool clipFromName(const char* name, Clip& out) {
-    if (!name) return false;
-    if (!strcmp(name, "enter")) { out = CLIP_ENTER; return true; }
-    if (!strcmp(name, "leave")) { out = CLIP_LEAVE; return true; }
-    return false;
+String clipPathForId(int targetId, bool enter) {
+    if (targetId <= 0) return enter ? "/enter.wav" : "/leave.wav";
+    return "/t" + String(targetId) + (enter ? "e" : "l") + ".wav";
 }
 
-size_t clipBytes(Clip c) {
-    if (!LittleFS.exists(clipPath(c))) return 0;
-    File f = LittleFS.open(clipPath(c), "r");
+bool clipIdParse(const char* s, int& targetId, bool& enter) {
+    if (!s) return false;
+    if (!strcmp(s, "enter")) { targetId = 0; enter = true; return true; }
+    if (!strcmp(s, "leave")) { targetId = 0; enter = false; return true; }
+    if (s[0] != 't') return false;
+    char* end;
+    long  id = strtol(s + 1, &end, 10);
+    if (end == s + 1 || id < 1 || id > 255) return false;
+    if (!strcmp(end, "e")) enter = true;
+    else if (!strcmp(end, "l")) enter = false;
+    else return false;
+    targetId = (int)id;
+    return true;
+}
+
+size_t clipBytesPath(const String& path) {
+    if (!LittleFS.exists(path)) return 0;
+    File   f = LittleFS.open(path, "r");
     size_t n = f ? f.size() : 0;
     f.close();
     return n;
@@ -112,8 +127,9 @@ static inline int16_t applyGain(int32_t s, int32_t g) {
     return (int16_t)(s > 32767 ? 32767 : (s < -32768 ? -32768 : s));
 }
 
-static bool playFile(Clip c) {
-    File f = LittleFS.open(clipPath(c), "r");
+static bool playFile(const String& path) {
+    if (!LittleFS.exists(path)) return false;
+    File f = LittleFS.open(path, "r");
     if (!f) return false;
     WavInfo w;
     if (!wavParse(f, w) || !i2sOpen(w.sampleRate)) {
@@ -146,18 +162,18 @@ static bool playFile(Clip c) {
 
 // Built-in fallback: a cheerful rising "ta-da" for enter, a sad descending
 // "wah wah wah" for leave.
-static void playSynth(Clip c) {
+static void playSynth(bool enter) {
     const uint32_t rate = 16000;
     static const float enterNotes[] = {523.25f, 659.25f, 783.99f, 1046.5f};  // C5 E5 G5 C6
     static const float leaveNotes[] = {392.00f, 369.99f, 349.23f, 329.63f};  // G4 F#4 F4 E4
-    const float*   notes  = c == CLIP_ENTER ? enterNotes : leaveNotes;
+    const float*   notes  = enter ? enterNotes : leaveNotes;
     const float    durSec[] = {0.12f, 0.12f, 0.12f, 0.45f};
     const float    leaveDur[] = {0.35f, 0.35f, 0.35f, 0.9f};
     if (!i2sOpen(rate)) return;
     int32_t g     = gainQ12();
     float   phase = 0;
     for (int n = 0; n < 4 && !s_stop; n++) {
-        float    d      = c == CLIP_ENTER ? durSec[n] : leaveDur[n];
+        float    d      = enter ? durSec[n] : leaveDur[n];
         uint32_t total  = (uint32_t)(d * rate);
         float    f0     = notes[n];
         uint32_t i      = 0;
@@ -165,8 +181,8 @@ static void playSynth(Clip c) {
             size_t frames = min<uint32_t>(FRAMES, total - i);
             for (size_t k = 0; k < frames; k++, i++) {
                 float t   = (float)i / rate;
-                float env = min(1.0f, t * 200.0f) * expf(-t * (c == CLIP_ENTER ? 6.0f : 2.5f));
-                float f   = c == CLIP_ENTER ? f0 : f0 * (1.0f + 0.03f * sinf(2 * PI * 6 * t));  // wobble
+                float env = min(1.0f, t * 200.0f) * expf(-t * (enter ? 6.0f : 2.5f));
+                float f   = enter ? f0 : f0 * (1.0f + 0.03f * sinf(2 * PI * 6 * t));  // wobble
                 phase += 2 * PI * f / rate;
                 if (phase > 2 * PI) phase -= 2 * PI;
                 // a bit of 2nd harmonic makes it audible on a tiny speaker
@@ -181,24 +197,27 @@ static void playSynth(Clip c) {
 }
 
 static void audioTask(void*) {
-    Clip c;
+    PlayReq r;
     for (;;) {
-        if (xQueueReceive(s_queue, &c, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(s_queue, &r, portMAX_DELAY) != pdTRUE) continue;
         s_busy = true;
         s_stop = false;
-        if (!playFile(c)) playSynth(c);
+        bool played = r.targetId && playFile(clipPathForId(r.targetId, r.enter));
+        if (!played) played = playFile(clipPathForId(0, r.enter));
+        if (!played) playSynth(r.enter);
         s_busy = false;
     }
 }
 
 void audioBegin() {
-    s_queue = xQueueCreate(2, sizeof(Clip));
+    s_queue = xQueueCreate(2, sizeof(PlayReq));
     xTaskCreatePinnedToCore(audioTask, "audio", 6144, nullptr, 3, nullptr, 1);
 }
 
-void audioPlay(Clip c) {
+void audioPlay(int targetId, bool enter) {
     if (s_busy) return;  // don't stack sounds
-    xQueueSend(s_queue, &c, 0);
+    PlayReq r{(uint8_t)max(0, targetId), enter};
+    xQueueSend(s_queue, &r, 0);
 }
 
 void audioStop() { s_stop = true; }

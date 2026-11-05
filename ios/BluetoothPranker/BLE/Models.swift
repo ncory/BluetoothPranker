@@ -9,6 +9,44 @@ enum Clip: String, CaseIterable, Identifiable {
     var symbol: String { self == .enter ? "figure.walk.arrival" : "figure.walk.departure" }
 }
 
+/// Where a clip lives on the device: the shared default, or a per-target override.
+struct ClipSlot: Hashable, Identifiable {
+    var targetID: Int?  // nil = default sound used by every target
+    var kind: Clip
+
+    var id: String { wireID }
+    /// "enter" / "leave" for defaults, "t<id>e" / "t<id>l" for targets.
+    var wireID: String {
+        guard let t = targetID else { return kind.rawValue }
+        return "t\(t)\(kind == .enter ? "e" : "l")"
+    }
+}
+
+/// A phone the device recognizes.
+struct TargetInfo: Identifiable, Equatable {
+    let id: Int
+    var name: String
+    var enabled: Bool
+    var enterClipBytes: Int
+    var leaveClipBytes: Int
+
+    init(id: Int, name: String, enabled: Bool, enterClipBytes: Int = 0, leaveClipBytes: Int = 0) {
+        self.id = id
+        self.name = name
+        self.enabled = enabled
+        self.enterClipBytes = enterClipBytes
+        self.leaveClipBytes = leaveClipBytes
+    }
+
+    init?(json d: [String: Any]) {
+        guard let id = jsonInt(d["id"]) else { return nil }
+        self.init(id: id, name: d["n"] as? String ?? "Target", enabled: jsonBool(d["on"]),
+                  enterClipBytes: jsonInt(d["ce"]) ?? 0, leaveClipBytes: jsonInt(d["cl"]) ?? 0)
+    }
+
+    func clipBytes(_ kind: Clip) -> Int { kind == .enter ? enterClipBytes : leaveClipBytes }
+}
+
 /// Mirrors the firmware's settings JSON (short keys on the wire).
 struct DeviceConfig: Codable, Equatable {
     var armed: Bool
@@ -50,41 +88,70 @@ fileprivate func jsonDouble(_ v: Any?) -> Double? { (v as? NSNumber)?.doubleValu
 fileprivate func jsonInt(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue }
 fileprivate func jsonBool(_ v: Any?) -> Bool { (v as? NSNumber)?.boolValue ?? false }
 
-/// Live status, sent by the device twice a second while connected.
+/// Device-wide live status, sent twice a second while connected.
 struct DeviceStatus {
-    var present: Bool
-    var lastRSSI: Int?
-    var msSinceSeen: Int?
-    var smoothed: Double?
-    var packetsPerSec: Double
+    var anyPresent: Bool
     var phoneRSSI: Int?          // RSSI of *this* phone's connection
     var armingRemaining: Int     // seconds of silent "hide" time left
-    var cooldownRemaining: Int
     var playing: Bool
     var uploadReceived: Int?
     var uploadTotal: Int?
 
     init(json d: [String: Any]) {
-        present = jsonInt(d["st"]) == 1
-        lastRSSI = jsonInt(d["r"])
-        msSinceSeen = jsonInt(d["age"])
-        smoothed = jsonDouble(d["s"])
-        packetsPerSec = jsonDouble(d["pps"]) ?? 0
+        anyPresent = jsonInt(d["any"]) == 1
         phoneRSSI = jsonInt(d["cr"])
         armingRemaining = jsonInt(d["wait"]) ?? 0
-        cooldownRemaining = jsonInt(d["cd"]) ?? 0
         playing = jsonBool(d["busy"])
         uploadReceived = jsonInt(d["up"])
         uploadTotal = jsonInt(d["upT"])
     }
 
+    init(anyPresent: Bool, phoneRSSI: Int?, armingRemaining: Int, playing: Bool) {
+        self.anyPresent = anyPresent
+        self.phoneRSSI = phoneRSSI
+        self.armingRemaining = armingRemaining
+        self.playing = playing
+    }
+}
+
+/// Live presence of one target, sent twice a second for each enabled target.
+struct TargetStatus {
+    var id: Int
+    var present: Bool
+    var lastRSSI: Int?
+    var msSinceSeen: Int?
+    var smoothed: Double?
+    var packetsPerSec: Double
+    var cooldownRemaining: Int
+
+    init?(json d: [String: Any]) {
+        guard let id = jsonInt(d["id"]) else { return nil }
+        self.id = id
+        present = jsonInt(d["st"]) == 1
+        lastRSSI = jsonInt(d["r"])
+        msSinceSeen = jsonInt(d["age"])
+        smoothed = jsonDouble(d["s"])
+        packetsPerSec = jsonDouble(d["pps"]) ?? 0
+        cooldownRemaining = jsonInt(d["cd"]) ?? 0
+    }
+
+    init(id: Int, present: Bool, lastRSSI: Int?, msSinceSeen: Int?, smoothed: Double?, packetsPerSec: Double) {
+        self.id = id
+        self.present = present
+        self.lastRSSI = lastRSSI
+        self.msSinceSeen = msSinceSeen
+        self.smoothed = smoothed
+        self.packetsPerSec = packetsPerSec
+        self.cooldownRemaining = 0
+    }
+
     var everSeen: Bool { msSinceSeen != nil }
     /// The target is actively being heard right now (a packet within the last 5 s).
-    var hearingTarget: Bool { (msSinceSeen ?? .max) < 5000 }
+    var hearing: Bool { (msSinceSeen ?? .max) < 5000 }
 }
 
 enum EnrollResult: Int {
-    case none = 0, success, timeout, failed, cancelled
+    case none = 0, success, timeout, failed, cancelled, full
 
     var text: String? {
         switch self {
@@ -93,6 +160,7 @@ enum EnrollResult: Int {
         case .timeout: return "Last enrollment timed out (3 minutes) before the phone paired."
         case .failed: return "Last enrollment failed: the phone paired but didn't share its identity key. Try again."
         case .cancelled: return "Last enrollment was cancelled with the button."
+        case .full: return "Last enrollment failed: the target list is full."
         }
     }
 }
@@ -101,8 +169,10 @@ enum EnrollResult: Int {
 struct DeviceInfo {
     var protocolVersion: Int
     var firmware: String
-    var hasTarget: Bool
-    var enterClipBytes: Int
+    var targetCount: Int
+    var maxTargets: Int
+    var targetsVersion: Int
+    var enterClipBytes: Int   // default clips
     var leaveClipBytes: Int
     var freeBytes: Int
     var enrollResult: EnrollResult
@@ -111,7 +181,9 @@ struct DeviceInfo {
     init(json d: [String: Any]) {
         protocolVersion = jsonInt(d["v"]) ?? 0
         firmware = d["fw"] as? String ?? "?"
-        hasTarget = jsonBool(d["irk"])
+        targetCount = jsonInt(d["nt"]) ?? 0
+        maxTargets = jsonInt(d["max"]) ?? 8
+        targetsVersion = jsonInt(d["tv"]) ?? 0
         enterClipBytes = jsonInt(d["ce"]) ?? 0
         leaveClipBytes = jsonInt(d["cl"]) ?? 0
         freeBytes = jsonInt(d["free"]) ?? 0
@@ -119,12 +191,27 @@ struct DeviceInfo {
         uptimeSec = jsonInt(d["upt"]) ?? 0
     }
 
-    func clipBytes(_ clip: Clip) -> Int { clip == .enter ? enterClipBytes : leaveClipBytes }
+    init(firmware: String, targetCount: Int, freeBytes: Int, uptimeSec: Int) {
+        protocolVersion = 2
+        self.firmware = firmware
+        self.targetCount = targetCount
+        maxTargets = 8
+        targetsVersion = 0
+        enterClipBytes = 0
+        leaveClipBytes = 0
+        self.freeBytes = freeBytes
+        enrollResult = .none
+        self.uptimeSec = uptimeSec
+    }
+
+    func clipBytes(_ kind: Clip) -> Int { kind == .enter ? enterClipBytes : leaveClipBytes }
 }
 
 struct DeviceEvent: Identifiable {
     let id = UUID()
     let date: Date
+    let targetID: Int
+    let targetName: String
     let enter: Bool
     let played: Bool
     let reason: String?
@@ -145,6 +232,7 @@ struct DeviceEvent: Identifiable {
 struct LogEntry: Identifiable {
     let id = UUID()
     let date: Date
+    let targetID: Int
     let enter: Bool
     let played: Bool
 }
@@ -152,9 +240,9 @@ struct LogEntry: Identifiable {
 struct RSSIPoint: Identifiable {
     let id = UUID()
     let date: Date
-    let target: Double?     // smoothed target RSSI (what the device uses)
-    let targetRaw: Double?  // last raw target packet
-    let phone: Double?      // this phone's connection RSSI, smoothed
+    var smoothed: [Int: Double] = [:]  // per target: what the device decides on
+    var raw: [Int: Double] = [:]       // per target: latest packet
+    var phone: Double?                 // this phone's connection RSSI, smoothed
 }
 
 enum CRC32 {

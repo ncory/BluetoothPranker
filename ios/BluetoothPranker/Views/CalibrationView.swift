@@ -4,15 +4,14 @@ import SwiftUI
 struct CalibrationView: View {
     @Environment(BLEManager.self) private var ble
 
-    enum Source: String, CaseIterable, Identifiable {
-        case phone = "This phone"
-        case target = "His phone"
-        var id: Self { self }
+    enum Source: Hashable {
+        case phone          // this iPhone's connection to the device
+        case target(Int)    // an enrolled phone, exactly as the device sees it
     }
 
     enum Spot { case inside, outside }
 
-    @State private var source: Source = .phone
+    @State private var source: Source
     @State private var capturing: Spot?
     @State private var captureStart = Date()
     @State private var samples: [Double] = []
@@ -21,12 +20,18 @@ struct CalibrationView: View {
     @State private var enterDraft: Double = -70
     @State private var exitDraft: Double = -82
 
-    private let captureSeconds: TimeInterval = 12
+    private let captureSeconds: TimeInterval = 10
+
+    init(initialSource: Source = .phone) {
+        _source = State(initialValue: initialSource)
+    }
 
     private var currentValue: Double? {
         switch source {
         case .phone: return ble.phoneSmoothed
-        case .target: return ble.status?.hearingTarget == true ? ble.status?.smoothed : nil
+        case .target(let id):
+            guard let s = ble.targetStatus[id], s.hearing else { return nil }
+            return s.smoothed
         }
     }
 
@@ -39,12 +44,12 @@ struct CalibrationView: View {
         List {
             Section {
                 Picker("Measure", selection: $source) {
-                    ForEach(Source.allCases) { Text($0.rawValue).tag($0) }
+                    Text("This phone (app connection)").tag(Source.phone)
+                    ForEach(ble.enabledTargets) { t in
+                        Text("Target: \(t.name)").tag(Source.target(t.id))
+                    }
                 }
-                .pickerStyle(.segmented)
-                Text(source == .phone
-                     ? "Uses the signal from this iPhone, so you don't need his. iPhones are similar enough that this works well. Keep it in a pocket like he would, since a body blocks a few dB."
-                     : "Uses his enrolled iPhone, which you'll need to carry around. Most accurate.")
+                Text(sourceHelp)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -59,10 +64,10 @@ struct CalibrationView: View {
             }
 
             Section {
-                CaptureRow(title: "1. Inside", detail: "Stand where he should count as *in*, e.g. a step inside the doorway.",
+                CaptureRow(title: "1. Inside", detail: "Stand where someone should count as *in*, e.g. a step inside the doorway.",
                            value: inside, isCapturing: capturing == .inside, progress: progress) { start(.inside) }
                     .disabled(capturing != nil)
-                CaptureRow(title: "2. Outside", detail: "Stand where he should count as *out*, e.g. in the hallway or next room.",
+                CaptureRow(title: "2. Outside", detail: "Stand where someone should count as *out*, e.g. in the hallway or next room.",
                            value: outside, isCapturing: capturing == .outside, progress: progress) { start(.outside) }
                     .disabled(capturing != nil)
                 if let i = inside, let o = outside {
@@ -103,7 +108,7 @@ struct CalibrationView: View {
             } header: {
                 Text("Thresholds")
             } footer: {
-                Text("Higher (closer to 0) means closer to the device. Keep a gap between the two values so it doesn't flip back and forth at the doorway. 'Leave' also triggers when his phone hasn't been heard for the 'gone' time in Settings.")
+                Text("Higher (closer to 0) means closer to the device. Keep a gap between the two values so it doesn't flip back and forth at the doorway. 'Leave' also triggers when a phone hasn't been heard for the 'gone' time in Settings.")
             }
         }
         .navigationTitle("Calibrate")
@@ -116,6 +121,21 @@ struct CalibrationView: View {
         .onChange(of: enterDraft) { _, v in if exitDraft > v - 2 { exitDraft = v - 2 } }
         .onChange(of: exitDraft) { _, v in if enterDraft < v + 2 { enterDraft = v + 2 } }
         .onChange(of: ble.statusSeq) { _, _ in collect() }
+        .onChange(of: source) { _, _ in
+            capturing = nil
+            inside = nil
+            outside = nil
+        }
+        .sensoryFeedback(.impact, trigger: ble.events.first?.id)
+    }
+
+    private var sourceHelp: String {
+        switch source {
+        case .phone:
+            return "Uses this iPhone's connection to the app, so you don't need to enroll anything. Close enough to how the device hears a target, typically within a few dB."
+        case .target(let id):
+            return "Uses \(ble.targetName(id))'s phone exactly as the device detects it. Most accurate. If that's your phone, enroll it as a target first. Keep it in a pocket like the real target would, since a body blocks a few dB."
+        }
     }
 
     private var progress: Double {
@@ -134,9 +154,9 @@ struct CalibrationView: View {
         guard Date().timeIntervalSince(captureStart) >= captureSeconds else { return }
         capturing = nil
         guard let m = Calibration.median(samples), samples.count >= 5 else {
-            ble.lastError = source == .target
-                ? "Couldn't hear his phone. Is it enrolled, nearby and awake?"
-                : "Didn't get enough signal readings. Stay connected and try again."
+            ble.lastError = source == .phone
+                ? "Didn't get enough signal readings. Stay connected and try again."
+                : "Couldn't hear that phone. Is it enrolled, enabled and nearby?"
             return
         }
         if spot == .inside { inside = m } else { outside = m }
@@ -188,16 +208,21 @@ struct RSSIChart: View {
     let enter: Int
     let exit: Int
 
+    private var targetID: Int? {
+        if case .target(let id) = source { return id }
+        return nil
+    }
+
     var body: some View {
         Chart {
             ForEach(points) { p in
-                if source == .target {
-                    if let raw = p.targetRaw {
+                if let id = targetID {
+                    if let raw = p.raw[id] {
                         PointMark(x: .value("Time", p.date), y: .value("dBm", raw))
                             .symbolSize(10)
                             .foregroundStyle(Color.gray.opacity(0.5))
                     }
-                    if let t = p.target {
+                    if let t = p.smoothed[id] {
                         LineMark(x: .value("Time", p.date), y: .value("dBm", t), series: .value("Series", "target"))
                             .foregroundStyle(Color.blue)
                     }

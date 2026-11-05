@@ -1,15 +1,25 @@
 # Bluetooth Pranker
 
-A tiny hidden speaker that plays a sound when a specific iPhone comes into
-range or leaves. It runs on an **M5Stack Atom Echo** (ESP32 + speaker in a
+A tiny hidden speaker that plays a sound when one of up to eight enrolled
+iPhones comes into range or leaves. It runs on an **M5Stack Atom Echo** (ESP32 + speaker in a
 24 mm cube) and comes with an **iOS companion app** for setup, calibration and
 custom sounds.
 
 ```
 firmware/   ESP32 firmware (PlatformIO, Arduino framework)
 ios/        SwiftUI companion app (Xcode 16+, iOS 17+)
-docs/       BLE protocol between the two
+docs/       BLE protocol between the two, and UI mockups
 ```
+
+<p>
+<img src="docs/mockups/1-dashboard.png" width="180">
+<img src="docs/mockups/3-target.png" width="180">
+<img src="docs/mockups/2-calibrate.png" width="180">
+<img src="docs/mockups/4-sounds.png" width="180">
+</p>
+
+*(These are mockups drawn to match the SwiftUI layouts. To see the real app
+without hardware, run it in the iOS Simulator and tap **Try demo mode**.)*
 
 ## How it works
 
@@ -17,18 +27,20 @@ iPhones change their Bluetooth address every ~15 minutes, but every address is
 derived from the phone's **Identity Resolving Key (IRK)**. A phone hands its IRK
 to devices it pairs with. So:
 
-1. **Enrollment (once).** The Atom pretends to be a Bluetooth keyboard. You pair
-   the target iPhone with it from *Settings › Bluetooth*, and it keeps the IRK.
+1. **Enrollment (once per phone).** The Atom pretends to be a Bluetooth
+   keyboard. You pair the target iPhone with it from *Settings › Bluetooth*,
+   and it stores the IRK under a name you choose. It holds up to 8 targets.
    Then it reboots with a different address, so the iPhone never reconnects.
    You can then *Forget This Device* on the iPhone.
 2. **Normal mode.** The Atom passively listens to Bluetooth advertisements. It
-   recognizes the target iPhone by checking each address against the IRK, then
-   tracks its signal strength (RSSI).
+   recognizes each target iPhone by checking addresses against the stored IRKs,
+   then tracks each one's signal strength (RSSI) separately.
 3. **Presence.** A smoothed RSSI above the *enter* threshold means "arrived".
    Below the *leave* threshold for a few seconds, or not heard at all for a
    while, means "left". The gap between the two thresholds stops it from
    flip-flopping at the doorway.
-4. **Prank.** On arrive/leave it plays a sound. Hide timer, cooldown and random
+4. **Prank.** On arrive/leave it plays that target's own sound if it has one,
+   otherwise the default sound. Hide timer, cooldown and random
    chance settings keep it unpredictable and give you time to hide it.
 
 ## What you need
@@ -57,39 +69,61 @@ target phone is enrolled. Pressing the button plays the "enter" sound.
 
 Open `ios/BluetoothPranker.xcodeproj`. Under *Signing & Capabilities*, pick
 your Team and change the bundle identifier (`com.example.BluetoothPranker`) to
-something of yours. Then run it on your iPhone. Bluetooth doesn't work in the
-simulator.
+something of yours. Then run it on your iPhone.
+
+The iOS Simulator has no Bluetooth, but **demo mode** (button on the scanner
+screen, or launch argument `-demo`) simulates a device with a few targets so
+you can click through every screen and take real screenshots.
 
 ## Setup walkthrough
 
 1. Open the app and tap your device to connect. The app remembers it and
    reconnects automatically from then on.
-2. **Target phone → Start enrollment.** The Atom's LED pulses blue. On his
-   unlocked iPhone, go to *Settings › Bluetooth*, tap the device under *Other
-   Devices*, then tap *Pair*. Green means success. Then tap ⓘ › *Forget This
-   Device* on his phone. Tip: rehearse with your own iPhone first.
-3. **Calibrate range.** Choose *This phone* (no need for his phone). Measure
-   once standing just inside the room and once just outside, then tap *Use
-   these values*. Keep the phone in a pocket while measuring.
-4. **Sounds.** Record your own, type text-to-speech, or import any audio file.
-   Clips are converted on the phone to 16 kHz mono WAV, trimmed and normalized,
-   then uploaded over Bluetooth.
-5. **Hide it.** Tap *Start hide timer* (default 60 s of silence), stash the
-   device and walk away. The live event list and *Event log* show what
-   happened.
+2. **Add yourself as a test target first.** *Targets › Add target*, name it
+   "Me (test)", tap *Start pairing*. The Atom's LED pulses blue. On your
+   iPhone, go to *Settings › Bluetooth*, tap the device under *Other Devices*,
+   then *Pair*. Green means success. Then tap ⓘ › *Forget This Device*.
+3. **Calibrate range.** Choose *Target: Me (test)* and measure once just inside
+   the room and once just outside, phone in a pocket. Tap *Use these values*.
+4. **Walk test.** Walk in and out with your phone. You'll hear the sounds, and
+   with the app open you get a haptic tap and a live event for each one. For
+   a realistic test, also try it with the phone locked in a pocket (see below).
+5. **Sounds.** Set default sounds and, optionally, per-target ones: record
+   your own, type text-to-speech, or import any audio file. Clips are
+   converted on the phone to 16 kHz mono WAV, trimmed and normalized, then
+   uploaded over Bluetooth.
+6. **Add the real target** the same way, using their phone. Pause or remove
+   "Me (test)" so you don't set it off yourself.
+7. **Hide it.** Tap *Start hide timer* (default 60 s of silence), stash the
+   device and walk away. The event log shows what happened.
+
+### Testing with your own phone
+
+- **The app's connection doesn't interfere.** Detection uses the phone's
+  regular Bluetooth broadcasts, which an iPhone keeps sending while connected
+  to the app. Each target is matched by its own key, so your phone being both
+  "the app" and "a target" is fine.
+- **An unlocked phone in your hand is easier to detect than a locked one in a
+  pocket.** It broadcasts more often, and your hand blocks less signal than a
+  body. So arrivals and departures can look quicker in testing than they'll be
+  for real. Do at least one walk with your phone locked in a pocket, then
+  check the event log.
+- *This phone (app connection)* in Calibrate measures the app's own link
+  instead, so you can calibrate without enrolling anything. It's close to how
+  the device hears a target, typically within a few dB.
 
 ## Device controls
 
 | Action | Result |
 |---|---|
-| Short press | Play the "enter" sound |
-| Hold 3 s | Enrollment mode (LED pulses blue) |
+| Short press | Play the default "enter" sound |
+| Hold 3 s | Enrollment mode for a new target named "Target" (rename it in the app) |
 | Press during enrollment | Cancel |
 
 | LED | Meaning |
 |---|---|
 | White flash | Booted |
-| Yellow blink every 3 s | No target phone enrolled yet |
+| Yellow blink every 3 s | No (enabled) target phones yet |
 | Pulsing blue | Enrollment: waiting for the iPhone to pair |
 | Green / red (2 s) | Enrollment succeeded / failed |
 | Off | Normal (stealth). Turn on "Show presence on LED" in Settings to debug. |
@@ -104,8 +138,11 @@ simulator.
   sharper in/out difference than an open floor plan.
 - **Placement.** Put the device on the "inside" side of the room, not next
   to the door, and not inside a closed metal or wooden box.
-- If the Calibrate screen shows his phone isn't heard at all, re-enroll it.
-  A *Reset Network Settings* on his phone creates a new IRK.
+- If a target isn't heard at all, re-enroll it (this keeps its sounds; the
+  same phone is recognized and just renamed). *Reset Network Settings* on a
+  phone creates a new IRK.
+- Thresholds are shared by all targets. Different iPhone models read within a
+  few dB of each other, so calibrating with one phone is usually fine.
 
 ## Status
 

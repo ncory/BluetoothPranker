@@ -8,6 +8,7 @@
 #include "protocol.h"
 #include "rpa.h"
 #include "settings.h"
+#include "targets.h"
 
 static const uint32_t ENROLL_TIMEOUT_MS = 3 * 60 * 1000;
 
@@ -76,8 +77,8 @@ class EnrollServerCB : public NimBLEServerCallbacks {
     }
 };
 
-void enrollRun() {
-    Serial.println("[enroll] === ENROLLMENT MODE ===");
+void enrollRun(const String& targetName) {
+    Serial.printf("[enroll] === ENROLLMENT MODE for '%s' ===\n", targetName.c_str());
     Serial.println("[enroll] On the target iPhone: Settings > Bluetooth, tap the device under 'Other Devices', then Pair.");
 
     String name = settings.name;
@@ -123,8 +124,7 @@ void enrollRun() {
         (now / 400) % 2 ? ledSet(0, 0, 30) : ledSet(0, 0, 4);  // pulsing blue
 
         if (s_done) {
-            irkSave(s_irk);
-            result = ENROLL_OK;
+            result = targetAddOrUpdate(targetName.c_str(), s_irk) > 0 ? ENROLL_OK : ENROLL_FULL;
             break;
         }
         if (s_failed) {

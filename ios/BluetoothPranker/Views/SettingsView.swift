@@ -47,8 +47,8 @@ struct SettingsView: View {
         }
 
         Section {
-            Toggle("Play when he arrives", isOn: c.playEnter)
-            Toggle("Play when he leaves", isOn: c.playLeave)
+            Toggle("Play on arrival", isOn: c.playEnter)
+            Toggle("Play on departure", isOn: c.playLeave)
             VStack(alignment: .leading) {
                 LabeledContent("Volume", value: "\(c.wrappedValue.volume)%")
                 Slider(value: doubleBinding(c.volume), in: 0...100, step: 5)
@@ -68,7 +68,7 @@ struct SettingsView: View {
         } header: {
             Text("Timing")
         } footer: {
-            Text("Hide timer: silence after power-on. Cooldown: minimum time between sounds. Gone after silence: counts as 'left' if his phone isn't heard this long; locked iPhones sometimes go quiet for a while, so don't set it too low. Weak signal must last: how long it must stay below the leave threshold.")
+            Text("Hide timer: silence after power-on. Cooldown: minimum time between sounds for the same person. Gone after silence: counts as 'left' if a phone isn't heard this long; locked iPhones sometimes go quiet for a while, so don't set it too low. Weak signal must last: how long it must stay below the leave threshold.")
         }
 
         Section {

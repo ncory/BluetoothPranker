@@ -5,8 +5,8 @@ struct DashboardView: View {
 
     var body: some View {
         List {
-            TargetSection()
-            if ble.info?.hasTarget == true, ble.config != nil {
+            TargetsSection()
+            if !ble.targets.isEmpty, ble.config != nil {
                 PrankSection()
             }
             TestSection()
@@ -16,9 +16,6 @@ struct DashboardView: View {
                 }
             }
             Section("Set up") {
-                NavigationLink { EnrollView() } label: {
-                    Label("Target phone", systemImage: "iphone.radiowaves.left.and.right")
-                }
                 NavigationLink { CalibrationView() } label: {
                     Label("Calibrate range", systemImage: "scope")
                 }
@@ -36,14 +33,22 @@ struct DashboardView: View {
                 Section {
                     LabeledContent("Firmware", value: info.firmware)
                     LabeledContent("Up for", value: formatDuration(info.uptimeSec))
+                    if ble.isDemo {
+                        Text("Demo mode: simulated device, nothing is sent over Bluetooth.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
         .navigationTitle(ble.deviceName)
+        .sensoryFeedback(.impact, trigger: ble.events.first?.id)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("Disconnect", systemImage: "xmark.circle", role: .destructive) { ble.disconnect() }
+                    Button(ble.isDemo ? "Exit demo" : "Disconnect", systemImage: "xmark.circle", role: .destructive) {
+                        ble.disconnect()
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -52,54 +57,36 @@ struct DashboardView: View {
     }
 }
 
-private struct TargetSection: View {
+private struct TargetsSection: View {
     @Environment(BLEManager.self) private var ble
 
     var body: some View {
-        Section("Target") {
-            if ble.info?.hasTarget == false {
-                NavigationLink { EnrollView() } label: {
+        Section {
+            if ble.targets.isEmpty {
+                NavigationLink { AddTargetView() } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label("No target phone yet", systemImage: "exclamationmark.triangle.fill")
+                        Label("No target phones yet", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("Pair his iPhone once so the device can recognize it.")
+                        Text("Pair an iPhone once so the device can recognize it. Start with your own to test.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-            } else if let s = ble.status {
-                HStack(spacing: 14) {
-                    Circle()
-                        .fill(s.present ? Color.green : (s.hearingTarget ? Color.yellow : Color.gray))
-                        .frame(width: 14, height: 14)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(s.present ? "In range" : (s.hearingTarget ? "Nearby, not in range" : "Not detected"))
-                            .font(.title3.bold())
-                        Text(subtitle(s))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if s.hearingTarget, let sm = s.smoothed {
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text("\(Int(sm.rounded())) dBm").font(.headline.monospacedDigit())
-                            SignalBars(rssi: Int(sm))
-                        }
-                    }
-                }
-                if s.hearingTarget, let sm = s.smoothed, let cfg = ble.config {
-                    RangeGauge(value: sm, enter: cfg.enterRssi, exit: cfg.exitRssi)
                 }
             } else {
-                ProgressView()
+                ForEach(ble.targets) { t in
+                    NavigationLink { TargetDetailView(targetID: t.id) } label: {
+                        TargetRow(target: t, status: ble.targetStatus[t.id])
+                    }
+                }
+                if ble.targets.count < (ble.info?.maxTargets ?? 8) {
+                    NavigationLink { AddTargetView() } label: {
+                        Label("Add target", systemImage: "plus.circle")
+                    }
+                }
             }
+        } header: {
+            Text("Targets")
         }
-    }
-
-    private func subtitle(_ s: DeviceStatus) -> String {
-        guard let ms = s.msSinceSeen else { return "Haven't heard his phone since power-on" }
-        let ago = ms < 1500 ? "just now" : "\(formatDuration(ms / 1000)) ago"
-        return "Last heard \(ago) · \(String(format: "%.1f", s.packetsPerSec)) packets/s"
     }
 }
 
@@ -113,15 +100,9 @@ private struct PrankSection: View {
                 set: { v in ble.perform { try await ble.update { $0.armed = v } } })) {
                 Label("Armed", systemImage: "bolt.fill")
             }
-            if let s = ble.status {
-                if s.armingRemaining > 0 {
-                    Label("Silent for \(formatDuration(s.armingRemaining)) more (hide timer)", systemImage: "timer")
-                        .foregroundStyle(.orange)
-                }
-                if s.cooldownRemaining > 0 {
-                    Label("Cooldown: \(formatDuration(s.cooldownRemaining))", systemImage: "hourglass")
-                        .foregroundStyle(.secondary)
-                }
+            if let wait = ble.status?.armingRemaining, wait > 0 {
+                Label("Silent for \(formatDuration(wait)) more (hide timer)", systemImage: "timer")
+                    .foregroundStyle(.orange)
             }
             Button {
                 ble.perform { try await ble.restartHideTimer() }
@@ -144,7 +125,7 @@ private struct TestSection: View {
             HStack {
                 ForEach(Clip.allCases) { clip in
                     Button {
-                        ble.perform { try await ble.play(clip) }
+                        ble.perform { try await ble.play(ClipSlot(targetID: nil, kind: clip)) }
                     } label: {
                         Label(clip.shortTitle, systemImage: clip.symbol)
                     }

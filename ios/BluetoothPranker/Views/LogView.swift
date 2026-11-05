@@ -16,7 +16,7 @@ struct LogView: View {
                                 .foregroundStyle(e.enter ? .green : .orange)
                                 .frame(width: 28)
                             VStack(alignment: .leading) {
-                                Text(e.enter ? "Arrived" : "Left")
+                                Text("\(ble.targetName(e.targetID)) \(e.enter ? "arrived" : "left")")
                                 Text(e.played ? "Sound played" : "Silent")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
