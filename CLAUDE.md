@@ -57,6 +57,12 @@ docs/mockups/             HTML-rendered mockups (NOT real screenshots)
 - **Verified on a real Atom Echo (2026-11-10):** flashes over USB (FTDI
   `/dev/cu.usbserial-*`) and boots: `Bluetooth Pranker 1.2.0`,
   `RPA self-test: ok`, `[app] ready`.
+- **Fixed on hardware:** the NimBLE host task (4 KB default) overflowed on
+  the `upload` and `play` commands, because commands run in its write
+  callback and touch LittleFS/ArduinoJson. `platformio.ini` now sets
+  `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192`. After the fix, an upload and
+  nine plays in a row ran without a crash. Watch for `Stack canary watchpoint
+  triggered (nimble_host)` if commands grow.
 - The **iOS app compiles** with Xcode 27.2 (iOS 27.2 SDK) with no errors or
   warnings, using the hand-written `project.pbxproj` as is. In the Simulator
   with `-demo`, every screen renders and the text-to-speech → convert →
