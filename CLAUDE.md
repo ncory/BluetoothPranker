@@ -62,11 +62,14 @@ docs/mockups/             HTML-rendered mockups (NOT real screenshots)
   with `-demo`, every screen renders and the text-to-speech → convert →
   (simulated) upload flow works. It has **not run on a real iPhone yet**.
 - **Not yet verified on real hardware.** Top risks to check first:
-  1. **Enrollment:** does iOS list the HID "keyboard" under Settings ›
-     Bluetooth › Other Devices, pair with it, and distribute its IRK
-     (`onAuthenticationComplete` → `ble_store_read_peer_sec`)? The code checks
-     the IRK against the connection's RPA and tries reversed byte order if
-     needed.
+  1. **Enrollment — works (iPhone 18 Pro, iOS 27.2, 2026-11-10).** iOS
+     listed the keyboard under Other Devices, paired, and shared its IRK. The
+     IRK resolved the connection's RPA as stored (no byte reversal needed),
+     and right after the reboot normal mode recognized the phone
+     (`[event] Me (test) ENTER`). Caveat: on the first attempt the keyboard
+     never appeared on the phone or a Mac, with no `[enroll] connected`; a
+     retry with identical advertising code worked. The cause is unknown. If it
+     recurs, check the `[enroll] … advertising ok` / `advertising=1` log lines.
   2. **Detection:** do iPhones' background advertisements resolve with that
      IRK, and how often do they arrive when the phone is locked (`pps` in
      status)?
