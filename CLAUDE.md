@@ -81,11 +81,21 @@ docs/mockups/             HTML-rendered mockups (NOT real screenshots)
      status)?
   3. **Audio pins/format:** BCLK 19, LRCK 33, DOUT 22, stereo frames with the
      mono sample duplicated. Check loudness and that there's no idle hiss.
-  4. **Upload:** chunks are write-without-response with offset headers and a
-     CRC check. Watch for "gap at" errors, and check throughput.
-  5. **Long config writes** (> MTU) rely on prepared writes.
+  4. **Upload — works (iOS 27.2).** No gaps, CRC and WAV checks pass, ~507-byte
+     chunks at MTU 517. Throughput was only 2.5–4.5 KB/s because the 90%
+     scan window starved the connection (see 6), and the app's fixed 20 s
+     `uploadDone` timeout fired on bigger clips: the progress bar counts bytes
+     handed to iOS, which buffers far ahead of the link. Now scanning pauses
+     during uploads and the timeout scales with size: ~11.6 KB/s (75 KB in
+     6.5 s). iOS kept a 30 ms interval when asked for 15–30 ms. Flash writes
+     are ~19% of upload time; moving them off the host task is the next
+     possible gain. `[upload] …` serial lines report bytes, time, chunks and
+     flash time.
+  5. **Long config writes** (> MTU) rely on prepared writes. iOS 27.2
+     negotiated MTU 517, so a full config fits in one write.
   6. **Concurrent** advertising + passive scanning + one connection under
-     NimBLE.
+     NimBLE: works, but the scan starves the connection's throughput (see 4).
+     Presence tracking pauses during an upload.
 
 ## Design decisions (and why)
 
