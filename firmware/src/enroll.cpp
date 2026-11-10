@@ -89,8 +89,8 @@ void enrollRun(const String& targetName) {
     // iPhone never recognizes us as its paired "keyboard" and won't reconnect.
     ble_addr_t addr;
     ble_hs_id_gen_rnd(0, &addr);
-    NimBLEDevice::setOwnAddr(addr.val);
-    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    if (!NimBLEDevice::setOwnAddr(addr.val) || !NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM))
+        Serial.println("[enroll] failed to set random address");
 
     NimBLEDevice::deleteAllBonds();
     NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/false, /*sc=*/true);
@@ -108,14 +108,17 @@ void enrollRun(const String& targetName) {
     hid->setReportMap(s_reportMap, sizeof(s_reportMap));
     hid->getInputReport(1);
     hid->setBatteryLevel(100);
-    server->start();
+    bool serverOk = server->start();
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->setAppearance(0x03C1);  // HID keyboard
     adv->addServiceUUID(hid->getHidService()->getUUID());
     adv->setName(name.c_str());
-    adv->start();
+    bool advOk = adv->start();
+    Serial.printf("[enroll] GATT server %s, advertising %s as '%s' from %s\n", serverOk ? "ok" : "FAILED",
+                  advOk ? "ok" : "FAILED", name.c_str(), NimBLEDevice::getAddress().toString().c_str());
 
+    uint32_t lastLog = millis();
     uint32_t start   = millis();
     int      result  = ENROLL_TIMEOUT;
     bool     wasDown = digitalRead(PIN_BUTTON) == LOW;
@@ -132,6 +135,10 @@ void enrollRun(const String& targetName) {
             break;
         }
         if (now - start > ENROLL_TIMEOUT_MS) break;
+        if (now - lastLog >= 15000) {
+            lastLog = now;
+            Serial.printf("[enroll] waiting for the iPhone, advertising=%d\n", ble_gap_adv_active());
+        }
 
         bool down = digitalRead(PIN_BUTTON) == LOW;
         if (down && !wasDown) {
