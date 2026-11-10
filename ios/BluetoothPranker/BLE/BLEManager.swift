@@ -277,7 +277,9 @@ final class BLEManager: NSObject {
             uploadProgress = Double(offset) / Double(wav.count)
         }
 
-        let done = try await waitForAck("uploadDone", timeout: 20)
+        // Progress counts bytes handed to iOS, which buffers well ahead of the
+        // link, so allow for the rest to drain at a slow ~2 KB/s.
+        let done = try await waitForAck("uploadDone", timeout: 20 + Double(wav.count) / 2_000)
         if !done.ok { throw BLEError.device(done.error ?? "upload failed") }
         refreshTargets()
     }
