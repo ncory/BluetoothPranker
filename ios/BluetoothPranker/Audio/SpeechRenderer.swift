@@ -1,8 +1,8 @@
 import AVFoundation
 
 /// Renders text-to-speech into an audio file (instead of playing it), so it
-/// can be uploaded as a clip.
-final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate {
+/// can be uploaded as a clip. Mutable state is guarded by `lock`.
+final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     private let synth = AVSpeechSynthesizer()
     private let lock = NSLock()
     private var file: AVAudioFile?
