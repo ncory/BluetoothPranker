@@ -60,7 +60,7 @@ static volatile bool s_haveTargets = false;  // any enabled target (read by loop
 static struct {
     bool     active = false;
     String   path;
-    uint32_t size = 0, crc = 0, received = 0, runningCrc = 0, startMs = 0;
+    uint32_t size = 0, crc = 0, received = 0, runningCrc = 0, startMs = 0, chunks = 0, writeUs = 0;
     File     file;
 } s_up;
 
@@ -190,8 +190,10 @@ static String handleEvent(int idx, PresenceEvent e, uint32_t now) {
 
 static void uploadLog(const char* result) {
     uint32_t ms = millis() - s_up.startMs;
-    Serial.printf("[upload] %s: %u/%u bytes in %u ms (%u B/s)\n", result, (unsigned)s_up.received,
-                  (unsigned)s_up.size, (unsigned)ms, (unsigned)(ms ? s_up.received * 1000ULL / ms : 0));
+    Serial.printf("[upload] %s: %u/%u bytes in %u ms (%u B/s), %u chunks, %u ms writing flash\n", result,
+                  (unsigned)s_up.received, (unsigned)s_up.size, (unsigned)ms,
+                  (unsigned)(ms ? s_up.received * 1000ULL / ms : 0), (unsigned)s_up.chunks,
+                  (unsigned)(s_up.writeUs / 1000));
 }
 
 static void uploadAbort(const char* why) {
@@ -237,6 +239,8 @@ static void uploadBegin(JsonDocument& doc) {
     s_up.received   = 0;
     s_up.runningCrc = 0;
     s_up.startMs    = millis();
+    s_up.chunks     = 0;
+    s_up.writeUs    = 0;
     s_infoDirty     = true;
     ack("upload", true);  // "ready"; the app now streams chunks
 }
@@ -275,8 +279,11 @@ static void uploadChunk(const uint8_t* d, size_t n) {
         snprintf(msg, sizeof msg, "gap at %u (got %u)", (unsigned)s_up.received, (unsigned)off);
         return uploadAbort(msg);
     }
-    size_t len = min<size_t>(n - 4, s_up.size - s_up.received);
+    size_t   len = min<size_t>(n - 4, s_up.size - s_up.received);
+    uint32_t t0  = micros();
     if (s_up.file.write(d + 4, len) != len) return uploadAbort("write failed (disk full?)");
+    s_up.writeUs += micros() - t0;
+    s_up.chunks++;
     s_up.runningCrc = crc32Update(s_up.runningCrc, d + 4, len);
     s_up.received  += len;
     if (s_up.received >= s_up.size) uploadFinish();
@@ -379,10 +386,18 @@ static void handleCommand(const uint8_t* data, size_t len) {
 // ---------------------------------------------------------------------------
 
 class ServerCB : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer*, NimBLEConnInfo& ci) override {
+    void onConnect(NimBLEServer* srv, NimBLEConnInfo& ci) override {
         s_conn      = ci.getConnHandle();
         s_infoDirty = true;
-        Serial.printf("[ble] app connected %s\n", ci.getAddress().toString().c_str());
+        Serial.printf("[ble] app connected %s, interval %.2f ms\n", ci.getAddress().toString().c_str(),
+                      ci.getConnInterval() * 1.25f);
+        // Ask for long link-layer packets for faster uploads; the phone decides.
+        // (Requesting a 15-30 ms interval didn't help: iOS kept 30 ms.)
+        srv->setDataLen(ci.getConnHandle(), 251);
+    }
+    void onConnParamsUpdate(NimBLEConnInfo& ci) override {
+        Serial.printf("[ble] conn interval %.2f ms, latency %u, timeout %u ms\n", ci.getConnInterval() * 1.25f,
+                      ci.getConnLatency(), ci.getConnTimeout() * 10);
     }
     void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
         s_conn = BLE_HS_CONN_HANDLE_NONE;
@@ -639,8 +654,10 @@ void appLoop() {
         if (s_conn != BLE_HS_CONN_HANDLE_NONE) s_chStatus->notify();
     }
 
-    if (s_haveTargets && !s_scan->isScanning()) s_scan->start(0, false, true);
-    if (!s_haveTargets && s_scan->isScanning()) s_scan->stop();
+    // The 90% scan window starves the app connection, so pause it during uploads.
+    bool wantScan = s_haveTargets && !s_up.active;
+    if (wantScan && !s_scan->isScanning()) s_scan->start(0, false, true);
+    if (!wantScan && s_scan->isScanning()) s_scan->stop();
 
     static uint32_t lastStatus = 0, lastInfo = 0;
     if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
