@@ -54,16 +54,14 @@ docs/mockups/             HTML-rendered mockups (NOT real screenshots)
 - Firmware **compiles cleanly** (flash ~77% of the 1.3 MB app partition). The
   RPA code passes the Bluetooth Core spec test vector (Vol 3 Part H D.7), and
   `rpaSelfTest()` re-runs it at boot.
-- The **iOS app has never been compiled**. It was written in a Linux container
-  without Xcode, so expect some compile errors on first build. Likely spots:
-  Swift concurrency/isolation (CoreBluetooth delegates use `nonisolated` +
-  `MainActor.assumeIsolated`), SwiftUI result-builder details, AVFoundation API
-  signatures. Fix them minimally and keep the design.
-- The `project.pbxproj` was hand-written. If Xcode refuses to open it,
-  regenerate a fresh iOS App project named `BluetoothPranker` and drag in the
-  `BluetoothPranker/` folder, with the same Info.plist keys:
-  NSBluetoothAlwaysUsageDescription and NSMicrophoneUsageDescription.
-- **Nothing has run on real hardware.** Top risks to check first:
+- **Verified on a real Atom Echo (2026-11-10):** flashes over USB (FTDI
+  `/dev/cu.usbserial-*`) and boots: `Bluetooth Pranker 1.2.0`,
+  `RPA self-test: ok`, `[app] ready`.
+- The **iOS app compiles** with Xcode 27.2 (iOS 27.2 SDK) with no errors or
+  warnings, using the hand-written `project.pbxproj` as is. In the Simulator
+  with `-demo`, every screen renders and the text-to-speech → convert →
+  (simulated) upload flow works. It has **not run on a real iPhone yet**.
+- **Not yet verified on real hardware.** Top risks to check first:
   1. **Enrollment:** does iOS list the HID "keyboard" under Settings ›
      Bluetooth › Other Devices, pair with it, and distribute its IRK
      (`onAuthenticationComplete` → `ble_store_read_peer_sec`)? The code checks

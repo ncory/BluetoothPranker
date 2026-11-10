@@ -148,10 +148,11 @@ you can click through every screen and take real screenshots.
 ## Status
 
 - **Firmware** compiles cleanly (PlatformIO, espressif32 8.0.0, NimBLE-Arduino
-  2.5.2). The address-resolution code is checked against the Bluetooth spec's
-  test vector at every boot.
-- **iOS app** hasn't been compiled yet. It was written without Xcode, so
-  expect a round of compile fixes on the first build.
-- **End to end:** nothing has run on real hardware yet.
+  2.5.2), flashes and boots on a real Atom Echo. The address-resolution code
+  is checked against the Bluetooth spec's test vector at every boot.
+- **iOS app** builds cleanly with Xcode 27 and runs in the Simulator in demo
+  mode. It hasn't run on a real iPhone yet.
+- **End to end:** enrollment, detection and upload haven't been tested on
+  real hardware yet.
 
 See `CLAUDE.md` for the design notes, known risks and test checklist.
