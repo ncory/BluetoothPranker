@@ -93,7 +93,10 @@ docs/mockups/             HTML-rendered mockups (NOT real screenshots)
   auto-reconnects to the "keyboard". A connected keyboard would hide its
   on-screen keyboard and give the prank away. The user then taps *Forget This
   Device* on the phone. The phone's IRK should persist; only *Reset Network
-  Settings* changes it. This is unverified.
+  Settings* changes it. Verified on iOS 27.2: after *Forget This Device* the
+  phone was still recognized. (While the app is connected, Settings lists
+  that connection as "Connected" with no ⓘ; close the app to see the
+  keyboard entry and forget it.)
 - **Passive scan, duplicates on, no stored results.** Every advert updates
   RSSI. `RpaMatcher` caches hits/misses so AES only runs on new addresses.
 - **Presence = EMA-smoothed RSSI with hysteresis.** Enter when smoothed ≥
