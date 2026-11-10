@@ -147,7 +147,11 @@ you can click through every screen and take real screenshots.
 
 ## Status
 
-The firmware compiles (PlatformIO, espressif32 8.0.0, NimBLE-Arduino 2.5.2),
-and the address-resolution code is checked against the Bluetooth spec's
-test vector at every boot. The iOS app and the end-to-end flow haven't been
-built or tested on real hardware yet, so expect a round of fixes.
+- **Firmware** compiles cleanly (PlatformIO, espressif32 8.0.0, NimBLE-Arduino
+  2.5.2). The address-resolution code is checked against the Bluetooth spec's
+  test vector at every boot.
+- **iOS app** hasn't been compiled yet. It was written without Xcode, so
+  expect a round of compile fixes on the first build.
+- **End to end:** nothing has run on real hardware yet.
+
+See `CLAUDE.md` for the design notes, known risks and test checklist.
