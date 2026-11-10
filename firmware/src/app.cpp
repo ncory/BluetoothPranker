@@ -60,7 +60,7 @@ static volatile bool s_haveTargets = false;  // any enabled target (read by loop
 static struct {
     bool     active = false;
     String   path;
-    uint32_t size = 0, crc = 0, received = 0, runningCrc = 0;
+    uint32_t size = 0, crc = 0, received = 0, runningCrc = 0, startMs = 0;
     File     file;
 } s_up;
 
@@ -188,7 +188,14 @@ static String handleEvent(int idx, PresenceEvent e, uint32_t now) {
 // Upload of sound clips (called on the NimBLE host task)
 // ---------------------------------------------------------------------------
 
+static void uploadLog(const char* result) {
+    uint32_t ms = millis() - s_up.startMs;
+    Serial.printf("[upload] %s: %u/%u bytes in %u ms (%u B/s)\n", result, (unsigned)s_up.received,
+                  (unsigned)s_up.size, (unsigned)ms, (unsigned)(ms ? s_up.received * 1000ULL / ms : 0));
+}
+
 static void uploadAbort(const char* why) {
+    if (why && s_up.active) uploadLog(why);
     if (s_up.active) {
         s_up.file.close();
         LittleFS.remove("/upload.tmp");
@@ -229,6 +236,7 @@ static void uploadBegin(JsonDocument& doc) {
     s_up.crc        = crc;
     s_up.received   = 0;
     s_up.runningCrc = 0;
+    s_up.startMs    = millis();
     s_infoDirty     = true;
     ack("upload", true);  // "ready"; the app now streams chunks
 }
@@ -240,6 +248,7 @@ static void uploadFinish() {
     g_targetsVersion++;  // clip sizes are part of the target list
 
     if (s_up.runningCrc != s_up.crc) {
+        uploadLog("crc mismatch");
         LittleFS.remove("/upload.tmp");
         return ack("uploadDone", false, "crc mismatch");
     }
@@ -248,10 +257,12 @@ static void uploadFinish() {
     bool    ok = f && wavParse(f, w);
     f.close();
     if (!ok) {
+        uploadLog("not a 16-bit PCM wav");
         LittleFS.remove("/upload.tmp");
         return ack("uploadDone", false, "not a 16-bit PCM wav");
     }
     LittleFS.rename("/upload.tmp", s_up.path);
+    uploadLog("ok");
     ack("uploadDone", true);
 }
 
